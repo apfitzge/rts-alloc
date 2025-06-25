@@ -15,7 +15,7 @@ impl Allocator {
     }
 
     /// Push a slab index onto the global free stack.
-    pub unsafe fn push_free_slab(&self, index: u32) {
+    pub unsafe fn return_the_slab(&self, index: u32) {
         let slab = self.slab(index).cast::<u32>();
         loop {
             let current_head = self.header().global_free_stack.load(Ordering::Acquire);
@@ -115,7 +115,7 @@ pub fn create_allocator(
 
     let allocator = Allocator { header };
     for index in (0..num_slabs).rev() {
-        unsafe { allocator.push_free_slab(index) };
+        unsafe { allocator.return_the_slab(index) };
     }
 
     Ok(Allocator { header })

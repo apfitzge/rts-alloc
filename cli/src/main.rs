@@ -37,7 +37,7 @@ fn main() {
             None => eprintln!("Failed to pop free slab"),
         },
         SubCommand::ReturnTheSlab { slab_index } => {
-            unsafe { allocator.push_free_slab(slab_index) };
+            unsafe { allocator.return_the_slab(slab_index) };
             println!("Returned slab index: {}", slab_index);
         }
     }
