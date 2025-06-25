@@ -448,6 +448,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rts-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "rts-alloc",
+]
+
+[[package]]
 name = "rts-tui"
 version = "0.1.0"
 dependencies = [

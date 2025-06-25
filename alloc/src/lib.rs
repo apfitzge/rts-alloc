@@ -15,7 +15,7 @@ impl Allocator {
     }
 
     /// Push a slab index onto the global free stack.
-    unsafe fn push_free_slab(&self, index: u32) {
+    pub unsafe fn push_free_slab(&self, index: u32) {
         let slab = self.slab(index).cast::<u32>();
         loop {
             let current_head = self.header().global_free_stack.load(Ordering::Acquire);
@@ -27,6 +27,27 @@ impl Allocator {
                 .is_ok()
             {
                 break;
+            }
+        }
+    }
+
+    /// Try to pop a free slab index from the global free stack.
+    /// Returns `None` if the stack is empty.
+    pub fn try_pop_free_slab(&self) -> Option<u32> {
+        let header = self.header();
+        loop {
+            let current_head = header.global_free_stack.load(Ordering::Acquire);
+            if current_head == NULL {
+                return None;
+            }
+
+            let next_slab = unsafe { self.slab(current_head).cast::<u32>().read() };
+            if header
+                .global_free_stack
+                .compare_exchange(current_head, next_slab, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Some(current_head);
             }
         }
     }

@@ -14,6 +14,7 @@ use std::{
     io,
     path::PathBuf,
     sync::atomic::{AtomicUsize, Ordering},
+    time::{Duration, Instant},
 };
 
 #[derive(Parser)]
@@ -85,9 +86,21 @@ pub struct App {
 
 impl App {
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        const TICK_RATE: Duration = Duration::from_millis(100);
+        let mut last_tick = Instant::now();
+
         while !self.exit {
             terminal.draw(|frame| self.draw(frame))?;
-            self.handle_events()?;
+
+            let timeout = TICK_RATE
+                .checked_sub(last_tick.elapsed())
+                .unwrap_or(Duration::ZERO);
+
+            self.handle_events(timeout)?;
+
+            if last_tick.elapsed() >= TICK_RATE {
+                last_tick = Instant::now();
+            }
         }
         Ok(())
     }
@@ -96,13 +109,15 @@ impl App {
         frame.render_widget(self, frame.area());
     }
 
-    fn handle_events(&mut self) -> io::Result<()> {
-        match event::read()? {
-            Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                self.handle_key_event(key_event)
+    fn handle_events(&mut self, timeout: Duration) -> io::Result<()> {
+        if event::poll(timeout)? {
+            match event::read()? {
+                Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+                    self.handle_key_event(key_event)
+                }
+                _ => {}
             }
-            _ => {}
-        };
+        }
         Ok(())
     }
 
