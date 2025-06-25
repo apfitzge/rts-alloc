@@ -5,3 +5,7 @@ version = 4
 [[package]]
 name = "rts-alloc"
 version = "0.1.0"
+
+[[package]]
+name = "rts-tui"
+version = "0.1.0"
