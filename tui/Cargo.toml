@@ -4,3 +4,7 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
+clap = { workspace = true, features = ["derive"] }
+crossterm = { workspace = true }
+ratatui = { workspace = true }
+rts-alloc = { workspace = true}
