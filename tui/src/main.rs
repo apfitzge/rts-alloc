@@ -1,10 +1,8 @@
-use std::{io, path::PathBuf, sync::atomic::Ordering};
-
 use clap::{Parser, Subcommand};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::Stylize,
     symbols::border,
     text::Line,
@@ -12,6 +10,11 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 use rts_alloc::Allocator;
+use std::{
+    io,
+    path::PathBuf,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -67,6 +70,7 @@ fn main() {
     let mut terminal = ratatui::init();
     let _ = App {
         allocator,
+        slab_offset: AtomicUsize::new(0),
         exit: false,
     }
     .run(&mut terminal);
@@ -75,6 +79,7 @@ fn main() {
 
 pub struct App {
     allocator: Allocator,
+    slab_offset: AtomicUsize,
     exit: bool,
 }
 
@@ -104,8 +109,26 @@ impl App {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         match key_event.code {
             KeyCode::Char('q') => self.exit(),
+            KeyCode::Left => self.slab_offset(false),
+            KeyCode::Right => self.slab_offset(true),
             _ => {}
         }
+    }
+
+    fn slab_offset(&mut self, increment: bool) {
+        if increment {
+            self.slab_offset.fetch_add(1, Ordering::Relaxed)
+        } else {
+            self.slab_offset.fetch_sub(1, Ordering::Relaxed)
+        };
+
+        // Make sure the slab offset is within bounds.
+        self.slab_offset.store(
+            self.slab_offset
+                .load(Ordering::Relaxed)
+                .clamp(0, self.allocator.header().num_slabs as usize - 1),
+            Ordering::Relaxed,
+        );
     }
 
     fn exit(&mut self) {
@@ -130,7 +153,7 @@ impl Widget for &App {
             .constraints([
                 Constraint::Length(9),
                 Constraint::Length(5),
-                Constraint::Min(0),
+                Constraint::Min(5),
             ])
             .split(inner);
 
@@ -162,5 +185,101 @@ impl Widget for &App {
         let padding_block = Block::bordered().title("Padding");
         let padding = Paragraph::new("... padding ...").block(padding_block);
         padding.render(chunks[1], buf);
+
+        // -- Slab section
+        let slabs_block = Block::bordered().title("Slabs");
+        let slabs_inner = slabs_block.inner(chunks[2]);
+        slabs_block.render(chunks[2], buf);
+        {
+            let area = &slabs_inner;
+
+            let num_slabs = header.num_slabs as usize;
+            let slab_width = 14;
+            let slab_height = 3;
+            let slabs_per_row = usize::from(area.width / slab_width);
+
+            // We will have a partial view if the number of slabs
+            // is greater than the number of slabs that can fit in a row.
+            let (starting_index, ending_index) = if num_slabs > slabs_per_row {
+                // Adjust slab offset if necessary to avoid needing to scroll back many times.
+                let slab_offset = self.slab_offset.load(Ordering::Relaxed);
+                if slab_offset + slabs_per_row > num_slabs {
+                    self.slab_offset
+                        .store(num_slabs.saturating_sub(slabs_per_row), Ordering::Relaxed);
+                }
+                let slab_offset = self.slab_offset.load(Ordering::Relaxed);
+                (slab_offset, slab_offset + slabs_per_row)
+            } else {
+                (0, num_slabs)
+            };
+
+            for (index, slab_index) in (starting_index..ending_index).enumerate() {
+                let x = area.x + (index as u16 * slab_width);
+                let rect = Rect::new(x, area.y, slab_width, slab_height);
+
+                if (index == 0 && slab_index != 0)
+                    || (index == (slabs_per_row - 1) && slab_index != (num_slabs - 1))
+                {
+                    let slab_block = Block::bordered().border_set(border::PLAIN);
+                    let slab_value = Paragraph::new("...")
+                        .block(slab_block)
+                        .alignment(Alignment::Center);
+                    slab_value.render(rect, buf);
+                } else {
+                    // Each slab in its own mini-block
+                    let slab_block = Block::bordered()
+                        .title(format!("Slab {}", slab_index))
+                        .border_set(border::PLAIN);
+                    let slab_value =
+                        unsafe { self.allocator.slab(slab_index as u32).cast::<u32>().read() };
+                    let slab_value = Paragraph::new(slab_value.to_string())
+                        .block(slab_block)
+                        .alignment(Alignment::Center);
+                    slab_value.render(rect, buf);
+                }
+            }
+
+            // let (start_index, end_index, partial) = if num_slabs > slabs_per_row {
+            //     let slab_offset = if self.slab_offset + slabs_per_row > num_slabs {
+            //         num_slabs.saturating_sub(slabs_per_row)
+            //     } else {
+            //         self.slab_offset
+            //     };
+            //     (
+            //         slab_offset,
+            //         (slab_offset + slabs_per_row - 1).min(num_slabs), // -1 for trailing ... block
+            //         true,
+            //     )
+            // } else {
+            //     (0, num_slabs, false)
+            // };
+
+            // for (index, slab_index) in (start_index..end_index).enumerate() {
+            //     let x = area.x + (index as u16 * slab_width);
+            //     let rect = Rect::new(x, area.y, slab_width, slab_height);
+
+            //     // Each slab in its own mini-block
+            //     let slab_block = Block::bordered()
+            //         .title(format!("Slab {}", slab_index))
+            //         .border_set(border::PLAIN);
+            //     let slab_value =
+            //         unsafe { self.allocator.slab(slab_index as u32).cast::<u32>().read() };
+            //     let slab_value = Paragraph::new(slab_value.to_string())
+            //         .block(slab_block)
+            //         .alignment(Alignment::Center);
+            //     slab_value.render(rect, buf);
+            // }
+
+            // if partial {
+            //     let x = area.x + ((slabs_per_row - 1) as u16 * slab_width);
+            //     let rect = Rect::new(x, area.y, slab_width, slab_height);
+            //     // Trailing block for partial slabs
+            //     let partial_block = Block::bordered().title("...").border_set(border::PLAIN);
+            //     let partial_value = Paragraph::new("...")
+            //         .block(partial_block)
+            //         .alignment(Alignment::Center);
+            //     partial_value.render(rect, buf);
+            // }
+        }
     }
 }

@@ -32,7 +32,7 @@ impl Allocator {
     }
 
     /// Given a slab index, return a pointer to the slab memory.
-    unsafe fn slab(&self, index: u32) -> NonNull<u8> {
+    pub unsafe fn slab(&self, index: u32) -> NonNull<u8> {
         let header = self.header();
         self.header
             .cast::<u8>()
