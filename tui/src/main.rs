@@ -1,4 +1,4 @@
-use std::{io, path::PathBuf};
+use std::{io, path::PathBuf, sync::atomic::Ordering};
 
 use clap::{Parser, Subcommand};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
@@ -8,7 +8,7 @@ use ratatui::{
     style::Stylize,
     symbols::border,
     text::Line,
-    widgets::{Block, Row, Table, Widget},
+    widgets::{Block, Paragraph, Row, Table, Widget},
     DefaultTerminal, Frame,
 };
 use rts_alloc::Allocator;
@@ -127,7 +127,11 @@ impl Widget for &App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(1)
-            .constraints([Constraint::Length(7), Constraint::Min(0)])
+            .constraints([
+                Constraint::Length(8),
+                Constraint::Length(5),
+                Constraint::Min(0),
+            ])
             .split(inner);
 
         let header = self.allocator.header();
@@ -139,14 +143,23 @@ impl Widget for &App {
             Row::new(vec!["num_workers".into(), header.num_workers.to_string()]),
             Row::new(vec!["slab_size".into(), header.slab_size.to_string()]),
             Row::new(vec!["slab_offset".into(), header.slab_offset.to_string()]),
+            Row::new(vec![
+                "global_free_stack".into(),
+                header.global_free_stack.load(Ordering::Relaxed).to_string(),
+            ]),
         ];
         let header_block = Block::bordered().title("Header").border_set(border::PLAIN);
         let header_table = Table::new(
             header_rows,
-            &[Constraint::Length(15), Constraint::Length(30)],
+            &[Constraint::Length(20), Constraint::Length(30)],
         )
         .block(header_block)
         .column_spacing(2);
         header_table.render(chunks[0], buf);
+
+        // -- Padding Section
+        let padding_block = Block::bordered().title("Padding");
+        let padding = Paragraph::new("... padding ...").block(padding_block);
+        padding.render(chunks[1], buf);
     }
 }
