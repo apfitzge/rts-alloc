@@ -80,18 +80,19 @@ pub fn create_allocator(
         "Slab size must be a power of two"
     );
     let slab_offset = (core::mem::size_of::<Header>() as u32 + (slab_size - 1)) & !(slab_size - 1);
+    let num_slabs = (size as u32 - slab_offset) / slab_size;
 
     unsafe {
         (*header.as_mut()).magic = MAGIC;
         (*header.as_mut()).version = VERSION;
         (*header.as_mut()).num_workers = num_workers;
+        (*header.as_mut()).num_slabs = num_slabs;
         (*header.as_mut()).slab_size = slab_size;
         (*header.as_mut()).slab_offset = slab_offset;
         (*header.as_mut()).global_free_stack = CacheAlignedU32(AtomicU32::new(NULL));
     }
 
     let allocator = Allocator { header };
-    let num_slabs = (size as u32 - slab_offset) / slab_size;
     for index in (0..num_slabs).rev() {
         unsafe { allocator.push_free_slab(index) };
     }
@@ -136,6 +137,7 @@ pub struct Header {
     pub magic: u64,
     pub version: u32,
     pub num_workers: u32,
+    pub num_slabs: u32,
     pub slab_size: u32,
     pub slab_offset: u32,
     pub global_free_stack: CacheAlignedU32,

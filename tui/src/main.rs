@@ -128,7 +128,7 @@ impl Widget for &App {
             .direction(Direction::Vertical)
             .margin(1)
             .constraints([
-                Constraint::Length(8),
+                Constraint::Length(9),
                 Constraint::Length(5),
                 Constraint::Min(0),
             ])
@@ -141,6 +141,7 @@ impl Widget for &App {
             Row::new(vec!["magic".into(), format!("0x{:016X}", header.magic)]),
             Row::new(vec!["version".into(), header.version.to_string()]),
             Row::new(vec!["num_workers".into(), header.num_workers.to_string()]),
+            Row::new(vec!["num_slabs".into(), header.num_slabs.to_string()]),
             Row::new(vec!["slab_size".into(), header.slab_size.to_string()]),
             Row::new(vec!["slab_offset".into(), header.slab_offset.to_string()]),
             Row::new(vec![
