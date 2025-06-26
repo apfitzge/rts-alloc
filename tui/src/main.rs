@@ -132,9 +132,12 @@ impl App {
 
     fn slab_offset(&mut self, increment: bool) {
         if increment {
-            self.slab_offset.fetch_add(1, Ordering::Relaxed)
+            self.slab_offset.fetch_add(1, Ordering::Relaxed);
         } else {
-            self.slab_offset.fetch_sub(1, Ordering::Relaxed)
+            let prev = self.slab_offset.fetch_sub(1, Ordering::Relaxed);
+            if prev == 0 {
+                self.slab_offset.store(0, Ordering::Relaxed);
+            }
         };
 
         // Make sure the slab offset is within bounds.
@@ -162,19 +165,29 @@ impl Widget for &App {
         let inner = outer_block.inner(area);
         outer_block.render(area, buf);
 
+        let num_workers = self.allocator.header().num_workers;
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(1)
             .constraints([
                 Constraint::Length(9),
+                Constraint::Length(num_workers as u16 + 3),
                 Constraint::Length(5),
                 Constraint::Min(5),
             ])
             .split(inner);
 
-        let header = self.allocator.header();
+        self.render_header(chunks[0], buf);
+        self.render_workers(chunks[1], buf);
+        self.render_padding(chunks[2], buf);
+        self.render_slabs(chunks[3], buf);
+    }
+}
 
-        // -- Header Section
+impl App {
+    fn render_header(&self, area: Rect, buf: &mut Buffer) {
+        let header = self.allocator.header();
         let header_rows = vec![
             Row::new(vec!["magic".into(), format!("0x{:016X}", header.magic)]),
             Row::new(vec!["version".into(), header.version.to_string()]),
@@ -194,17 +207,90 @@ impl Widget for &App {
         )
         .block(header_block)
         .column_spacing(2);
-        header_table.render(chunks[0], buf);
+        header_table.render(area, buf);
+    }
 
-        // -- Padding Section
+    fn render_workers(&self, area: Rect, buf: &mut Buffer) {
+        let header = self.allocator.header();
+        let workers_block = Block::bordered().title("Workers");
+        let workers_inner = workers_block.inner(area);
+        workers_block.render(area, buf);
+
+        let area = &workers_inner;
+        let num_workers = header.num_workers;
+        let worker_width = 30;
+        let worker_height = 5;
+        let workers_per_row = u32::from(area.width / worker_width);
+
+        // We will have a partial view if the number of workers
+        // is greater than the number of slabs that can fit in a row.
+        let (starting_index, ending_index) = if num_workers > workers_per_row {
+            // Adjust slab offset if necessary to avoid needing to scroll back many times.
+            let worker_offset = 0;
+            (worker_offset, worker_offset + workers_per_row)
+        } else {
+            (0, num_workers)
+        };
+
+        for (index, worker_index) in (starting_index..ending_index).enumerate() {
+            let x = area.x + (index as u16 * worker_width);
+            let rect = Rect::new(x, area.y, worker_width, worker_height);
+
+            if (index == 0 && worker_index != 0)
+                || (index == (workers_per_row as usize - 1) && worker_index != (num_workers - 1))
+            {
+                self.render_worker_continuation(rect, buf);
+            } else {
+                self.render_worker(worker_index, rect, buf);
+            }
+        }
+    }
+
+    fn render_worker(&self, worker_index: u32, area: Rect, buf: &mut Buffer) {
+        let worker_block = Block::bordered()
+            .title(format!("Worker {}", worker_index))
+            .border_set(border::PLAIN);
+        let worker_state = unsafe { self.allocator.worker_state(worker_index as usize).as_ref() };
+        let partial_slabs_head = worker_state.partial_slabs_head.load(Ordering::Relaxed);
+        let full_slabs_head = worker_state.full_slabs_head.load(Ordering::Relaxed);
+        let table = Table::new(
+            vec![
+                Row::new(vec![
+                    "Partial Slabs".into(),
+                    format!("{}", partial_slabs_head),
+                ]),
+                Row::new(vec!["Full Slabs".into(), format!("{}", full_slabs_head)]),
+            ],
+            &[
+                Constraint::Length(16), // label column width
+                Constraint::Min(10),    // value column, right-aligned
+            ],
+        )
+        .block(worker_block)
+        .column_spacing(1);
+
+        table.render(area, buf);
+    }
+
+    fn render_worker_continuation(&self, area: Rect, buf: &mut Buffer) {
+        let worker_block = Block::bordered().border_set(border::PLAIN);
+        let worker_value = Paragraph::new("...")
+            .block(worker_block)
+            .alignment(Alignment::Center);
+        worker_value.render(area, buf);
+    }
+
+    fn render_padding(&self, area: Rect, buf: &mut Buffer) {
         let padding_block = Block::bordered().title("Padding");
         let padding = Paragraph::new("... padding ...").block(padding_block);
-        padding.render(chunks[1], buf);
+        padding.render(area, buf);
+    }
 
-        // -- Slab section
+    fn render_slabs(&self, area: Rect, buf: &mut Buffer) {
+        let header = self.allocator.header();
         let slabs_block = Block::bordered().title("Slabs");
-        let slabs_inner = slabs_block.inner(chunks[2]);
-        slabs_block.render(chunks[2], buf);
+        let slabs_inner = slabs_block.inner(area);
+        slabs_block.render(area, buf);
         {
             let area = &slabs_inner;
 
@@ -235,66 +321,30 @@ impl Widget for &App {
                 if (index == 0 && slab_index != 0)
                     || (index == (slabs_per_row - 1) && slab_index != (num_slabs - 1))
                 {
-                    let slab_block = Block::bordered().border_set(border::PLAIN);
-                    let slab_value = Paragraph::new("...")
-                        .block(slab_block)
-                        .alignment(Alignment::Center);
-                    slab_value.render(rect, buf);
+                    self.render_slab_continuation(rect, buf);
                 } else {
-                    // Each slab in its own mini-block
-                    let slab_block = Block::bordered()
-                        .title(format!("Slab {}", slab_index))
-                        .border_set(border::PLAIN);
-                    let slab_value =
-                        unsafe { self.allocator.slab(slab_index as u32).cast::<u32>().read() };
-                    let slab_value = Paragraph::new(slab_value.to_string())
-                        .block(slab_block)
-                        .alignment(Alignment::Center);
-                    slab_value.render(rect, buf);
+                    self.render_slab(slab_index, rect, buf);
                 }
             }
-
-            // let (start_index, end_index, partial) = if num_slabs > slabs_per_row {
-            //     let slab_offset = if self.slab_offset + slabs_per_row > num_slabs {
-            //         num_slabs.saturating_sub(slabs_per_row)
-            //     } else {
-            //         self.slab_offset
-            //     };
-            //     (
-            //         slab_offset,
-            //         (slab_offset + slabs_per_row - 1).min(num_slabs), // -1 for trailing ... block
-            //         true,
-            //     )
-            // } else {
-            //     (0, num_slabs, false)
-            // };
-
-            // for (index, slab_index) in (start_index..end_index).enumerate() {
-            //     let x = area.x + (index as u16 * slab_width);
-            //     let rect = Rect::new(x, area.y, slab_width, slab_height);
-
-            //     // Each slab in its own mini-block
-            //     let slab_block = Block::bordered()
-            //         .title(format!("Slab {}", slab_index))
-            //         .border_set(border::PLAIN);
-            //     let slab_value =
-            //         unsafe { self.allocator.slab(slab_index as u32).cast::<u32>().read() };
-            //     let slab_value = Paragraph::new(slab_value.to_string())
-            //         .block(slab_block)
-            //         .alignment(Alignment::Center);
-            //     slab_value.render(rect, buf);
-            // }
-
-            // if partial {
-            //     let x = area.x + ((slabs_per_row - 1) as u16 * slab_width);
-            //     let rect = Rect::new(x, area.y, slab_width, slab_height);
-            //     // Trailing block for partial slabs
-            //     let partial_block = Block::bordered().title("...").border_set(border::PLAIN);
-            //     let partial_value = Paragraph::new("...")
-            //         .block(partial_block)
-            //         .alignment(Alignment::Center);
-            //     partial_value.render(rect, buf);
-            // }
         }
+    }
+
+    fn render_slab(&self, slab_index: usize, area: Rect, buf: &mut Buffer) {
+        let slab_block = Block::bordered()
+            .title(format!("Slab {}", slab_index))
+            .border_set(border::PLAIN);
+        let slab_value = unsafe { self.allocator.slab(slab_index as u32).cast::<u32>().read() };
+        let slab_value = Paragraph::new(slab_value.to_string())
+            .block(slab_block)
+            .alignment(Alignment::Center);
+        slab_value.render(area, buf);
+    }
+
+    fn render_slab_continuation(&self, area: Rect, buf: &mut Buffer) {
+        let slab_block = Block::bordered().border_set(border::PLAIN);
+        let slab_value = Paragraph::new("...")
+            .block(slab_block)
+            .alignment(Alignment::Center);
+        slab_value.render(area, buf);
     }
 }

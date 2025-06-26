@@ -5,6 +5,18 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
+/// Size classes must be sub powers of two
+const SIZE_CLASSES: [u32; 5] = [256, 512, 1024, 2048, 4096];
+const MAX_SIZE: u32 = SIZE_CLASSES[SIZE_CLASSES.len() - 1];
+const BASE_SHIFT: u32 = SIZE_CLASSES[0].trailing_zeros() as u32;
+
+pub fn size_class_index(size: u32) -> u32 {
+    debug_assert!(size <= MAX_SIZE);
+    size.next_power_of_two()
+        .trailing_zeros()
+        .saturating_sub(BASE_SHIFT)
+}
+
 pub struct Allocator {
     header: NonNull<Header>,
 }
@@ -60,6 +72,14 @@ impl Allocator {
             .add(header.slab_offset as usize)
             .add((index * header.slab_size) as usize)
     }
+
+    /// Given a worker index, return a pointer to the worker state.
+    pub unsafe fn worker_state(&self, index: usize) -> NonNull<WorkerState> {
+        let header = self.header();
+        let worker_states_ptr = header.worker_states.as_ptr();
+        let worker_state_ptr = unsafe { worker_states_ptr.add(index) };
+        NonNull::new(worker_state_ptr.cast_mut()).expect("Worker state pointer should not be null")
+    }
 }
 
 pub fn create_allocator(
@@ -114,8 +134,24 @@ pub fn create_allocator(
     }
 
     let allocator = Allocator { header };
+    // Initialize slabs in the global free stack.
     for index in (0..num_slabs).rev() {
         unsafe { allocator.return_the_slab(index) };
+    }
+
+    // Initialize worker states.
+    for i in 0..num_workers {
+        let mut worker_state = unsafe { allocator.worker_state(i as usize) };
+        unsafe {
+            worker_state
+                .as_mut()
+                .partial_slabs_head
+                .store(NULL, Ordering::Relaxed);
+            worker_state
+                .as_mut()
+                .full_slabs_head
+                .store(NULL, Ordering::Relaxed);
+        }
     }
 
     Ok(Allocator { header })
@@ -154,6 +190,7 @@ pub fn join_allocator(file_path: impl AsRef<Path>) -> Result<Allocator, ()> {
 pub const MAGIC: u64 = 0x727473616c6f63; // "rtsaloc"
 pub const VERSION: u32 = 1;
 
+#[repr(C)]
 pub struct Header {
     pub magic: u64,
     pub version: u32,
@@ -162,6 +199,16 @@ pub struct Header {
     pub slab_size: u32,
     pub slab_offset: u32,
     pub global_free_stack: CacheAlignedU32,
+
+    /// Trailing array of worker states.
+    /// Length is `num_workers`.
+    pub worker_states: [WorkerState; 0],
+}
+
+#[repr(C)]
+pub struct WorkerState {
+    pub partial_slabs_head: CacheAlignedU32,
+    pub full_slabs_head: CacheAlignedU32,
 }
 
 #[repr(C, align(64))]
