@@ -5,9 +5,10 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
+pub const NUM_SIZE_CLASSES: usize = 5;
 /// Size classes must be sub powers of two
-const SIZE_CLASSES: [u32; 5] = [256, 512, 1024, 2048, 4096];
-const MAX_SIZE: u32 = SIZE_CLASSES[SIZE_CLASSES.len() - 1];
+pub const SIZE_CLASSES: [u32; NUM_SIZE_CLASSES] = [256, 512, 1024, 2048, 4096];
+const MAX_SIZE: u32 = SIZE_CLASSES[NUM_SIZE_CLASSES - 1];
 const BASE_SHIFT: u32 = SIZE_CLASSES[0].trailing_zeros() as u32;
 
 pub fn size_class_index(size: u32) -> u32 {
@@ -140,17 +141,14 @@ pub fn create_allocator(
     }
 
     // Initialize worker states.
-    for i in 0..num_workers {
-        let mut worker_state = unsafe { allocator.worker_state(i as usize) };
-        unsafe {
-            worker_state
-                .as_mut()
-                .partial_slabs_head
-                .store(NULL, Ordering::Relaxed);
-            worker_state
-                .as_mut()
-                .full_slabs_head
-                .store(NULL, Ordering::Relaxed);
+    for worker_index in 0..num_workers {
+        let mut worker_state = unsafe { allocator.worker_state(worker_index as usize) };
+        for size_index in 0..NUM_SIZE_CLASSES {
+            unsafe {
+                worker_state.as_mut().partial_slabs_heads[size_index]
+                    .store(NULL, Ordering::Relaxed);
+                worker_state.as_mut().full_slabs_heads[size_index].store(NULL, Ordering::Relaxed);
+            }
         }
     }
 
@@ -207,8 +205,8 @@ pub struct Header {
 
 #[repr(C)]
 pub struct WorkerState {
-    pub partial_slabs_head: CacheAlignedU32,
-    pub full_slabs_head: CacheAlignedU32,
+    pub partial_slabs_heads: [CacheAlignedU32; NUM_SIZE_CLASSES],
+    pub full_slabs_heads: [CacheAlignedU32; NUM_SIZE_CLASSES],
 }
 
 #[repr(C, align(64))]

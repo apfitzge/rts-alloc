@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{Block, Paragraph, Row, Table, Widget},
     DefaultTerminal, Frame,
 };
-use rts_alloc::Allocator;
+use rts_alloc::{Allocator, NUM_SIZE_CLASSES, SIZE_CLASSES};
 use std::{
     io,
     path::PathBuf,
@@ -187,14 +187,12 @@ impl Widget for &App {
         let inner = outer_block.inner(area);
         outer_block.render(area, buf);
 
-        let num_workers = self.allocator.header().num_workers;
-
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(1)
             .constraints([
                 Constraint::Length(9),
-                Constraint::Length(num_workers as u16 + 3),
+                Constraint::Length(12),
                 Constraint::Length(5),
                 Constraint::Min(5),
             ])
@@ -245,8 +243,8 @@ impl App {
 
         let area = &workers_inner;
         let num_workers = header.num_workers as usize;
-        let worker_width = 30;
-        let worker_height = 5;
+        let worker_width = 38;
+        let worker_height = NUM_SIZE_CLASSES as u16 + 4;
         let workers_per_row = usize::from(area.width / worker_width);
 
         // We will have a partial view if the number of workers
@@ -285,23 +283,35 @@ impl App {
             .title(format!("Worker {}", worker_index))
             .border_set(border::PLAIN);
         let worker_state = unsafe { self.allocator.worker_state(worker_index as usize).as_ref() };
-        let partial_slabs_head = worker_state.partial_slabs_head.load(Ordering::Relaxed);
-        let full_slabs_head = worker_state.full_slabs_head.load(Ordering::Relaxed);
-        let table = Table::new(
-            vec![
+
+        let rows = SIZE_CLASSES
+            .iter()
+            .enumerate()
+            .map(|(size_index, size)| {
+                let partial = worker_state.partial_slabs_heads[size_index].load(Ordering::Relaxed);
+                let full = worker_state.full_slabs_heads[size_index].load(Ordering::Relaxed);
                 Row::new(vec![
-                    "Partial Slabs".into(),
-                    format!("{}", partial_slabs_head),
-                ]),
-                Row::new(vec!["Full Slabs".into(), format!("{}", full_slabs_head)]),
-            ],
-            &[
-                Constraint::Length(16), // label column width
-                Constraint::Min(10),    // value column, right-aligned
-            ],
-        )
-        .block(worker_block)
-        .column_spacing(1);
+                    size.to_string(),
+                    partial.to_string(),
+                    full.to_string(),
+                ])
+            })
+            .collect::<Vec<_>>();
+
+        let table =
+            Table::new(
+                rows,
+                &[
+                    Constraint::Length(8),  // size
+                    Constraint::Length(14), // partial head
+                    Constraint::Length(10), // full head
+                ],
+            )
+            .header(Row::new(vec!["Size", "Partial Head", "Full Head"]).style(
+                ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+            ))
+            .block(worker_block)
+            .column_spacing(2);
 
         table.render(area, buf);
     }
