@@ -5,18 +5,14 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
-pub const NUM_SIZE_CLASSES: usize = 5;
-/// Size classes must be sub powers of two
-pub const SIZE_CLASSES: [u32; NUM_SIZE_CLASSES] = [256, 512, 1024, 2048, 4096];
-const MAX_SIZE: u32 = SIZE_CLASSES[NUM_SIZE_CLASSES - 1];
-const BASE_SHIFT: u32 = SIZE_CLASSES[0].trailing_zeros() as u32;
+use crate::{
+    cache_aligned::{CacheAligned, CacheAlignedU32},
+    size_classes::NUM_SIZE_CLASSES,
+};
 
-pub fn size_class_index(size: u32) -> u32 {
-    debug_assert!(size <= MAX_SIZE);
-    size.next_power_of_two()
-        .trailing_zeros()
-        .saturating_sub(BASE_SHIFT)
-}
+pub mod cache_aligned;
+pub mod free_stack;
+pub mod size_classes;
 
 pub struct Allocator {
     header: NonNull<Header>,
@@ -149,7 +145,7 @@ pub fn create_allocator(
         (*header.as_mut()).num_slabs = num_slabs;
         (*header.as_mut()).slab_size = slab_size;
         (*header.as_mut()).slab_offset = slab_offset;
-        (*header.as_mut()).global_free_stack = CacheAlignedU32(AtomicU32::new(NULL));
+        (*header.as_mut()).global_free_stack = CacheAligned(AtomicU32::new(NULL));
     }
 
     let allocator = Allocator { header };
@@ -225,17 +221,6 @@ pub struct Header {
 pub struct WorkerState {
     pub partial_slabs_heads: [CacheAlignedU32; NUM_SIZE_CLASSES],
     pub full_slabs_heads: [CacheAlignedU32; NUM_SIZE_CLASSES],
-}
-
-#[repr(C, align(64))]
-pub struct CacheAlignedU32(AtomicU32);
-
-impl core::ops::Deref for CacheAlignedU32 {
-    type Target = AtomicU32;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
 }
 
 const NULL: u32 = u32::MAX;

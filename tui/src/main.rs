@@ -9,7 +9,10 @@ use ratatui::{
     widgets::{Block, Paragraph, Row, Table, Widget},
     DefaultTerminal, Frame,
 };
-use rts_alloc::{Allocator, NUM_SIZE_CLASSES, SIZE_CLASSES};
+use rts_alloc::{
+    size_classes::{NUM_SIZE_CLASSES, SIZE_CLASSES},
+    Allocator,
+};
 use std::{
     io,
     path::PathBuf,
