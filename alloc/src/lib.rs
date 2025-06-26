@@ -27,6 +27,24 @@ impl Allocator {
         unsafe { self.header.as_ref() }
     }
 
+    /// Take a free slab for the worker, for a specific size class.
+    pub fn take_free_slab(&self, worker_index: usize, size_class_index: usize) -> bool {
+        let Some(slab_index) = self.try_pop_free_slab() else {
+            return false;
+        };
+
+        // No other worker should be touching this workers partial/full lists.
+        // No need to do a CAS, since there should not be contention.
+        let worker = unsafe { self.worker_state(worker_index).as_ref() };
+        let partial_head = &worker.partial_slabs_heads[size_class_index as usize];
+        let current_head = partial_head.load(Ordering::Relaxed);
+        let slab = unsafe { self.slab(slab_index).cast::<u32>() };
+        unsafe { slab.write(current_head) };
+        partial_head.store(slab_index, Ordering::Relaxed);
+
+        return true;
+    }
+
     /// Push a slab index onto the global free stack.
     pub unsafe fn return_the_slab(&self, index: u32) {
         let slab = self.slab(index).cast::<u32>();

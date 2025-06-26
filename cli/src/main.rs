@@ -15,8 +15,13 @@ struct Args {
 
 #[derive(Clone, Debug, Subcommand)]
 enum SubCommand {
-    PopFreeSlab { worker_id: u32 },
-    ReturnTheSlab { slab_index: u32 },
+    TakeFreeSlab {
+        worker_id: usize,
+        size_class_index: usize,
+    },
+    ReturnTheSlab {
+        slab_index: u32,
+    },
 }
 
 fn main() {
@@ -32,10 +37,19 @@ fn main() {
     };
 
     match args.subcommand {
-        SubCommand::PopFreeSlab { worker_id } => match allocator.try_pop_free_slab() {
-            Some(slab_index) => println!("Worker {} popped slab index: {}", worker_id, slab_index),
-            None => eprintln!("Failed to pop free slab"),
-        },
+        SubCommand::TakeFreeSlab {
+            worker_id,
+            size_class_index,
+        } => {
+            if allocator.take_free_slab(worker_id, size_class_index) {
+                println!(
+                    "Worker {} popped slab with size class {}",
+                    worker_id, size_class_index
+                );
+            } else {
+                eprintln!("Failed to take free slab");
+            }
+        }
         SubCommand::ReturnTheSlab { slab_index } => {
             unsafe { allocator.return_the_slab(slab_index) };
             println!("Returned slab index: {}", slab_index);
