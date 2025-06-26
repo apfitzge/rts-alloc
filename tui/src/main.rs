@@ -71,16 +71,25 @@ fn main() {
     let mut terminal = ratatui::init();
     let _ = App {
         allocator,
+        worker_offset: AtomicUsize::new(0),
         slab_offset: AtomicUsize::new(0),
+        selected_section: Section::Slabs, // default to Slabs because there will more often be more of those
         exit: false,
     }
     .run(&mut terminal);
     ratatui::restore();
 }
 
+enum Section {
+    Workers,
+    Slabs,
+}
+
 pub struct App {
     allocator: Allocator,
+    worker_offset: AtomicUsize,
     slab_offset: AtomicUsize,
+    selected_section: Section,
     exit: bool,
 }
 
@@ -124,29 +133,42 @@ impl App {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         match key_event.code {
             KeyCode::Char('q') => self.exit(),
-            KeyCode::Left => self.slab_offset(false),
-            KeyCode::Right => self.slab_offset(true),
+            KeyCode::Left => self.scroll(false),
+            KeyCode::Right => self.scroll(true),
+            KeyCode::Down => self.select(false),
+            KeyCode::Up => self.select(true),
             _ => {}
         }
     }
 
-    fn slab_offset(&mut self, increment: bool) {
+    fn scroll(&mut self, increment: bool) {
+        let header = self.allocator.header();
+        let (offset, max) = match self.selected_section {
+            Section::Workers => (&self.worker_offset, header.num_workers),
+            Section::Slabs => (&self.slab_offset, header.num_slabs),
+        };
+
         if increment {
-            self.slab_offset.fetch_add(1, Ordering::Relaxed);
+            offset.fetch_add(1, Ordering::Relaxed);
         } else {
-            let prev = self.slab_offset.fetch_sub(1, Ordering::Relaxed);
+            let prev = offset.fetch_sub(1, Ordering::Relaxed);
             if prev == 0 {
-                self.slab_offset.store(0, Ordering::Relaxed);
+                offset.store(0, Ordering::Relaxed);
             }
         };
 
-        // Make sure the slab offset is within bounds.
-        self.slab_offset.store(
-            self.slab_offset
-                .load(Ordering::Relaxed)
-                .clamp(0, self.allocator.header().num_slabs as usize - 1),
+        // Make sure the offset is within bounds.
+        offset.store(
+            offset.load(Ordering::Relaxed).clamp(0, max as usize - 1),
             Ordering::Relaxed,
         );
+    }
+
+    fn select(&mut self, _up: bool) {
+        match self.selected_section {
+            Section::Workers => self.selected_section = Section::Slabs,
+            Section::Slabs => self.selected_section = Section::Workers,
+        }
     }
 
     fn exit(&mut self) {
@@ -212,24 +234,36 @@ impl App {
 
     fn render_workers(&self, area: Rect, buf: &mut Buffer) {
         let header = self.allocator.header();
-        let workers_block = Block::bordered().title("Workers");
+        let workers_block =
+            Block::bordered().title(if matches!(self.selected_section, Section::Workers) {
+                "Workers*"
+            } else {
+                "Workers"
+            });
         let workers_inner = workers_block.inner(area);
         workers_block.render(area, buf);
 
         let area = &workers_inner;
-        let num_workers = header.num_workers;
+        let num_workers = header.num_workers as usize;
         let worker_width = 30;
         let worker_height = 5;
-        let workers_per_row = u32::from(area.width / worker_width);
+        let workers_per_row = usize::from(area.width / worker_width);
 
         // We will have a partial view if the number of workers
-        // is greater than the number of slabs that can fit in a row.
+        // is greater than the number of workers that can fit in a row.
         let (starting_index, ending_index) = if num_workers > workers_per_row {
-            // Adjust slab offset if necessary to avoid needing to scroll back many times.
-            let worker_offset = 0;
-            (worker_offset, worker_offset + workers_per_row)
+            // Adjust worker offset if necessary to avoid needing to scroll back many times.
+            let worker_offset = self.worker_offset.load(Ordering::Relaxed);
+            if worker_offset + workers_per_row > num_workers {
+                self.worker_offset.store(
+                    num_workers.saturating_sub(workers_per_row) as usize,
+                    Ordering::Relaxed,
+                );
+            }
+            let worker_offset = self.worker_offset.load(Ordering::Relaxed);
+            (worker_offset, worker_offset + workers_per_row as usize)
         } else {
-            (0, num_workers)
+            (0, num_workers as usize)
         };
 
         for (index, worker_index) in (starting_index..ending_index).enumerate() {
@@ -237,7 +271,7 @@ impl App {
             let rect = Rect::new(x, area.y, worker_width, worker_height);
 
             if (index == 0 && worker_index != 0)
-                || (index == (workers_per_row as usize - 1) && worker_index != (num_workers - 1))
+                || (index == (workers_per_row - 1) && worker_index != (num_workers - 1))
             {
                 self.render_worker_continuation(rect, buf);
             } else {
@@ -246,7 +280,7 @@ impl App {
         }
     }
 
-    fn render_worker(&self, worker_index: u32, area: Rect, buf: &mut Buffer) {
+    fn render_worker(&self, worker_index: usize, area: Rect, buf: &mut Buffer) {
         let worker_block = Block::bordered()
             .title(format!("Worker {}", worker_index))
             .border_set(border::PLAIN);
@@ -288,7 +322,12 @@ impl App {
 
     fn render_slabs(&self, area: Rect, buf: &mut Buffer) {
         let header = self.allocator.header();
-        let slabs_block = Block::bordered().title("Slabs");
+        let slabs_block =
+            Block::bordered().title(if matches!(self.selected_section, Section::Slabs) {
+                "Slabs*"
+            } else {
+                "Slabs"
+            });
         let slabs_inner = slabs_block.inner(area);
         slabs_block.render(area, buf);
         {
