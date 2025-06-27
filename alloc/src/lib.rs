@@ -9,7 +9,7 @@ use crate::{
     align::round_to_next_alignment_of,
     cache_aligned::{CacheAligned, CacheAlignedU32},
     free_stack::FreeStack,
-    size_classes::{MIN_SIZE, NUM_SIZE_CLASSES, SIZE_CLASSES},
+    size_classes::{size_class_index, MAX_SIZE, MIN_SIZE, NUM_SIZE_CLASSES, SIZE_CLASSES},
 };
 
 mod align;
@@ -17,8 +17,106 @@ pub mod cache_aligned;
 pub mod free_stack;
 pub mod size_classes;
 
+pub struct WorkerAssignedAllocator {
+    pub allocator: Allocator,
+    pub worker_index: usize,
+}
+
+impl WorkerAssignedAllocator {
+    pub fn new(allocator: Allocator, worker_index: usize) -> Self {
+        assert!(worker_index < allocator.header().num_workers as usize);
+        WorkerAssignedAllocator {
+            allocator,
+            worker_index,
+        }
+    }
+
+    pub fn allocate(&self, size: u32) -> Option<NonNull<u8>> {
+        if size > MAX_SIZE {
+            return None;
+        }
+        let size_class_index = size_class_index(size);
+
+        // Check if there is a partial slab available for this size class.
+        let worker = unsafe { self.allocator.worker_state(self.worker_index).as_ref() };
+        let partial_head = &worker.partial_slabs_heads[size_class_index as usize];
+        let mut allocation_slab_index = partial_head.load(Ordering::Acquire);
+        if allocation_slab_index == NULL {
+            // No partial slab available, try to take a free slab.
+            if !self
+                .allocator
+                .take_free_slab(self.worker_index, size_class_index as usize)
+            {
+                return None; // No free slab available.
+            }
+            allocation_slab_index = partial_head.load(Ordering::Acquire);
+        }
+
+        // At this point, we have a partial slab available.
+        debug_assert_ne!(
+            allocation_slab_index, NULL,
+            "partial slab head should not be NULL"
+        );
+
+        // Pop an item from the free stack of the slab.
+        let slab_meta = unsafe { self.allocator.slab_meta(allocation_slab_index).as_mut() };
+        let free_stack = &mut slab_meta.free_stack;
+        let allocation_index_in_slab = free_stack
+            .pop()
+            .expect("partial slab should have free items");
+
+        // If the free stack is now empty, move the slab to the full list.
+        if free_stack.is_empty() {
+            // Pop the slab from the partial list.
+            let next_partial_head = slab_meta.next;
+            worker.partial_slabs_heads[size_class_index as usize]
+                .store(next_partial_head, Ordering::Release);
+
+            // Push the slab to the full list.
+            let full_head = &worker.full_slabs_heads[size_class_index as usize];
+            let current_full_head = full_head.load(Ordering::Acquire);
+            slab_meta.next = current_full_head; // link the slab to the full list.
+            slab_meta.assigned_worker = self.worker_index as u32; // mark the slab as assigned to this worker.
+            full_head.store(allocation_slab_index, Ordering::Release);
+        }
+
+        let slab = unsafe { self.allocator.slab(allocation_slab_index) };
+        let offset = usize::from(allocation_index_in_slab)
+            * SIZE_CLASSES[size_class_index as usize] as usize;
+        Some(unsafe { slab.add(offset) })
+    }
+
+    pub unsafe fn free(&self, ptr: NonNull<u8>) {
+        let offset = ptr.byte_offset_from_unsigned(self.allocator.header);
+        let offset_from_slab_start = offset - self.allocator.header().slab_offset as usize;
+        let slab_index =
+            (offset_from_slab_start / self.allocator.header().slab_size as usize) as u32;
+
+        // We now know the slab index - we can get the slab metadata.
+        let slab_meta = unsafe { self.allocator.slab_meta(slab_index).as_mut() };
+        // Check if the slab is assigned to this worker.
+        if slab_meta.assigned_worker != self.worker_index as u32 {
+            unimplemented!("remote free not implemented yet");
+        }
+
+        // Local free - push the item back to the slab's free stack.
+        let size_class_index = slab_meta.size_class_index as usize;
+        let slab_size = self.allocator.header().slab_size as usize;
+        let slab_size_class = SIZE_CLASSES[size_class_index];
+        let allocation_index_in_slab = (offset_from_slab_start / slab_size_class as usize) as u16;
+        let free_stack = &mut slab_meta.free_stack;
+        free_stack.push(allocation_index_in_slab);
+
+        let free_stack_capacity = slab_size / slab_size_class as usize;
+        // If the free stack is now full (i.e. the slab is empty), move it back to the global free list.
+        if free_stack.len() == free_stack_capacity as u16 {
+            self.allocator.return_the_slab(slab_index);
+        }
+    }
+}
+
 pub struct Allocator {
-    header: NonNull<Header>,
+    pub header: NonNull<Header>,
 }
 
 impl Allocator {
@@ -36,15 +134,20 @@ impl Allocator {
         // No need to do a CAS, since there should not be contention.
         let worker = unsafe { self.worker_state(worker_index).as_ref() };
         let partial_head = &worker.partial_slabs_heads[size_class_index as usize];
-        let current_head = partial_head.load(Ordering::Relaxed);
+        let current_head = partial_head.load(Ordering::Acquire);
 
         let slab_meta = unsafe { self.slab_meta(slab_index).as_mut() };
         slab_meta.next = current_head; // link the slab to the worker's partial list.
+        slab_meta.assigned_worker = worker_index as u32; // mark the slab as assigned to this worker.
+        slab_meta.size_class_index = size_class_index as u8; // set the size class index.
         unsafe {
             slab_meta
                 .free_stack
                 .reset((self.header().slab_size / SIZE_CLASSES[size_class_index]) as u16);
         };
+
+        // Push the slab to the worker's partial list.
+        partial_head.store(slab_index, Ordering::Release);
 
         return true;
     }
@@ -53,7 +156,9 @@ impl Allocator {
     pub unsafe fn return_the_slab(&self, index: u32) {
         loop {
             let current_head = self.header().global_free_stack.load(Ordering::Acquire);
-            unsafe { self.slab_meta(index).as_mut().next = current_head };
+            let slab_meta = unsafe { self.slab_meta(index).as_mut() };
+            slab_meta.assigned_worker = NULL; // mark the slab as unassigned.
+            slab_meta.next = current_head; // link the slab to the global free stack.
             if self
                 .header()
                 .global_free_stack
@@ -202,8 +307,6 @@ pub fn create_allocator(
         }
     }
 
-    // Slab metas do not need initialization since they are not used until a slab is allocated.
-
     Ok(Allocator { header })
 }
 
@@ -268,7 +371,10 @@ pub struct WorkerState {
 
 #[repr(C)]
 pub struct SlabMeta {
-    pub next: u32, // used for intrusive linked-lists
+    pub next: u32,            // used for intrusive linked-lists
+    pub assigned_worker: u32, // worker assigned to this slab (if any)
+    pub size_class_index: u8, // index into SIZE_CLASSES
+    pub _padding: [u8; 55],   // padding to align to 64 bytes
     pub free_stack: FreeStack,
 }
 

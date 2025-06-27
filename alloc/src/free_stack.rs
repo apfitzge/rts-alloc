@@ -62,6 +62,11 @@ impl FreeStack {
         self.top.load(Ordering::Acquire)
     }
 
+    /// Returns true if the stack is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Return a value at a specific index.
     pub unsafe fn get(&self, index: u16) -> u16 {
         self.stack.as_ptr().add(usize::from(index)).read()
