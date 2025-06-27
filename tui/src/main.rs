@@ -339,7 +339,7 @@ impl App {
             let area = &slabs_meta_inner;
 
             let num_slabs = header.num_slabs as usize;
-            let slab_height = 9;
+            let slab_height = 10;
             let slabs_per_row = usize::from(area.width / SLAB_WIDTH);
 
             // We will have a partial view if the number of slabs
@@ -382,9 +382,6 @@ impl App {
             None
         };
 
-        let next = slab_meta.next; // Assuming `next` is accessible like this
-        let worker_id = slab_meta.assigned_worker; // Assuming `assigned_worker` is accessible like this
-
         let outer_block = Block::bordered()
             .title(format!("Slab Meta {}", slab_index))
             .border_set(border::PLAIN);
@@ -400,12 +397,15 @@ impl App {
         // - Bottom: for the Free Stack block
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .constraints([Constraint::Length(4), Constraint::Min(0)])
             .split(inner_area);
 
+        let prev = slab_meta.prev;
+        let next = slab_meta.next;
+        let worker_id = slab_meta.assigned_worker;
         let next_line = Paragraph::new(format!(
-            "next: {}\nworker: {}\nsize: {}\n",
-            next, worker_id, SIZE_CLASSES[slab_meta.size_class_index as usize]
+            "prev: {}\nnext: {}\nworker: {}\nsize: {}\n",
+            prev, next, worker_id, SIZE_CLASSES[slab_meta.size_class_index as usize]
         ))
         .alignment(Alignment::Left);
 
