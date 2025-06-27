@@ -110,7 +110,7 @@ impl WorkerAssignedAllocator {
         let free_stack_capacity = slab_size / slab_size_class as usize;
         // If the free stack is now full (i.e. the slab is empty), move it back to the global free list.
         if free_stack.len() == free_stack_capacity as u16 {
-            self.allocator.return_the_slab(slab_index);
+            global_free_stack::return_the_slab(&self.allocator, slab_index);
         }
     }
 }
@@ -126,7 +126,7 @@ impl Allocator {
 
     /// Take a free slab for the worker, for a specific size class.
     pub fn take_free_slab(&self, worker_index: usize, size_class_index: usize) -> bool {
-        let Some(slab_index) = self.try_pop_free_slab() else {
+        let Some(slab_index) = global_free_stack::try_pop_free_slab(self) else {
             return false;
         };
 
@@ -150,45 +150,6 @@ impl Allocator {
         partial_head.store(slab_index, Ordering::Release);
 
         return true;
-    }
-
-    /// Push a slab index onto the global free stack.
-    pub unsafe fn return_the_slab(&self, index: u32) {
-        loop {
-            let current_head = self.header().global_free_stack.load(Ordering::Acquire);
-            let slab_meta = unsafe { self.slab_meta(index).as_mut() };
-            slab_meta.assigned_worker = NULL; // mark the slab as unassigned.
-            slab_meta.next = current_head; // link the slab to the global free stack.
-            if self
-                .header()
-                .global_free_stack
-                .compare_exchange(current_head, index, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                break;
-            }
-        }
-    }
-
-    /// Try to pop a free slab index from the global free stack.
-    /// Returns `None` if the stack is empty.
-    pub fn try_pop_free_slab(&self) -> Option<u32> {
-        let header = self.header();
-        loop {
-            let current_head = header.global_free_stack.load(Ordering::Acquire);
-            if current_head == NULL {
-                return None;
-            }
-
-            let next_slab = unsafe { self.slab_meta(current_head).as_ref().next };
-            if header
-                .global_free_stack
-                .compare_exchange(current_head, next_slab, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                return Some(current_head);
-            }
-        }
     }
 
     /// Given a slab index, return a pointer to the slab metadata.
@@ -292,7 +253,7 @@ pub fn create_allocator(
     let allocator = Allocator { header };
     // Initialize slabs in the global free stack.
     for index in (0..num_slabs).rev() {
-        unsafe { allocator.return_the_slab(index) };
+        unsafe { global_free_stack::return_the_slab(&allocator, index) };
     }
 
     // Initialize worker states.
@@ -379,3 +340,49 @@ pub struct SlabMeta {
 }
 
 const NULL: u32 = u32::MAX;
+
+// Includes all functions related to modifying the global free stack.
+// These are internal functions that should be used by the allocator only.
+mod global_free_stack {
+    use crate::{Allocator, NULL};
+    use std::sync::atomic::Ordering;
+
+    /// Push a slab index onto the global free stack.
+    pub unsafe fn return_the_slab(allocator: &Allocator, index: u32) {
+        loop {
+            let current_head = allocator.header().global_free_stack.load(Ordering::Acquire);
+            let slab_meta = unsafe { allocator.slab_meta(index).as_mut() };
+            slab_meta.assigned_worker = NULL; // mark the slab as unassigned.
+            slab_meta.next = current_head; // link the slab to the global free stack.
+            if allocator
+                .header()
+                .global_free_stack
+                .compare_exchange(current_head, index, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                break;
+            }
+        }
+    }
+
+    /// Try to pop a free slab index from the global free stack.
+    /// Returns `None` if the stack is empty.
+    pub fn try_pop_free_slab(allocator: &Allocator) -> Option<u32> {
+        let header = allocator.header();
+        loop {
+            let current_head = header.global_free_stack.load(Ordering::Acquire);
+            if current_head == NULL {
+                return None;
+            }
+
+            let next_slab = unsafe { allocator.slab_meta(current_head).as_ref().next };
+            if header
+                .global_free_stack
+                .compare_exchange(current_head, next_slab, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Some(current_head);
+            }
+        }
+    }
+}
