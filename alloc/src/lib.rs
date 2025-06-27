@@ -6,10 +6,13 @@ use std::{
 };
 
 use crate::{
+    align::round_to_next_alignment_of,
     cache_aligned::{CacheAligned, CacheAlignedU32},
-    size_classes::NUM_SIZE_CLASSES,
+    free_stack::FreeStack,
+    size_classes::{MIN_SIZE, NUM_SIZE_CLASSES, SIZE_CLASSES},
 };
 
+mod align;
 pub mod cache_aligned;
 pub mod free_stack;
 pub mod size_classes;
@@ -37,6 +40,16 @@ impl Allocator {
         let slab = unsafe { self.slab(slab_index).cast::<u32>() };
         unsafe { slab.write(current_head) };
         partial_head.store(slab_index, Ordering::Relaxed);
+
+        // Initialize the slab metadata.
+        let slab_meta = unsafe { self.slab_meta(slab_index).as_mut() };
+
+        // Reset the free stack for each slot in the slab.
+        unsafe {
+            slab_meta
+                .free_stack
+                .reset((self.header().slab_size / SIZE_CLASSES[size_class_index]) as u16);
+        };
 
         return true;
     }
@@ -79,6 +92,16 @@ impl Allocator {
         }
     }
 
+    /// Given a slab index, return a pointer to the slab metadata.
+    pub unsafe fn slab_meta(&self, index: u32) -> NonNull<SlabMeta> {
+        let header = self.header();
+        self.header
+            .cast::<u8>()
+            .add(header.slab_meta_offset as usize)
+            .add(index as usize * header.slab_meta_size as usize)
+            .cast()
+    }
+
     /// Given a slab index, return a pointer to the slab memory.
     pub unsafe fn slab(&self, index: u32) -> NonNull<u8> {
         let header = self.header();
@@ -103,6 +126,12 @@ pub fn create_allocator(
     slab_size: u32,
     size: usize,
 ) -> Result<Allocator, ()> {
+    // TODO: make error instead of panic.
+    assert!(
+        slab_size.is_power_of_two(),
+        "Slab size must be a power of two"
+    );
+
     let file_path = file_path.as_ref();
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -130,12 +159,23 @@ pub fn create_allocator(
     let header_ptr = mmap as *mut Header;
     let mut header = NonNull::new(header_ptr).ok_or(())?;
 
-    // TODO: make error instead of panic.
-    assert!(
-        slab_size.is_power_of_two(),
-        "Slab size must be a power of two"
-    );
-    let slab_offset = (core::mem::size_of::<Header>() as u32 + (slab_size - 1)) & !(slab_size - 1);
+    const WORKER_STATES_OFFSET: usize = core::mem::offset_of!(Header, worker_states);
+    let worker_states_size = (num_workers as usize) * core::mem::size_of::<WorkerState>();
+    const SLAB_META_ALIGNMENT: usize = core::mem::align_of::<SlabMeta>();
+    let slab_meta_offset = (WORKER_STATES_OFFSET + worker_states_size + SLAB_META_ALIGNMENT - 1)
+        & !(SLAB_META_ALIGNMENT - 1);
+
+    // Each SlabMeta is aligned to SLAB_META_ALIGNMENT
+    let slab_meta_size = core::mem::size_of::<SlabMeta>()
+        + (slab_size / MIN_SIZE) as usize * core::mem::size_of::<u16>();
+    // round to next multiple of alignment.
+    let slab_meta_size: usize = round_to_next_alignment_of::<SLAB_META_ALIGNMENT>(slab_meta_size);
+
+    // Total header and meta size - round to next multiple of slab size.
+    let mask = (slab_size - 1) as usize;
+    let total_meta_size = (slab_meta_offset + slab_meta_size + mask) & !mask;
+
+    let slab_offset = total_meta_size as u32;
     let num_slabs = (size as u32 - slab_offset) / slab_size;
 
     unsafe {
@@ -143,6 +183,8 @@ pub fn create_allocator(
         (*header.as_mut()).version = VERSION;
         (*header.as_mut()).num_workers = num_workers;
         (*header.as_mut()).num_slabs = num_slabs;
+        (*header.as_mut()).slab_meta_size = slab_meta_size as u32;
+        (*header.as_mut()).slab_meta_offset = slab_meta_offset as u32;
         (*header.as_mut()).slab_size = slab_size;
         (*header.as_mut()).slab_offset = slab_offset;
         (*header.as_mut()).global_free_stack = CacheAligned(AtomicU32::new(NULL));
@@ -165,6 +207,8 @@ pub fn create_allocator(
             }
         }
     }
+
+    // Slab metas do not need initialization since they are not used until a slab is allocated.
 
     Ok(Allocator { header })
 }
@@ -208,6 +252,8 @@ pub struct Header {
     pub version: u32,
     pub num_workers: u32,
     pub num_slabs: u32,
+    pub slab_meta_offset: u32,
+    pub slab_meta_size: u32,
     pub slab_size: u32,
     pub slab_offset: u32,
     pub global_free_stack: CacheAlignedU32,
@@ -215,12 +261,20 @@ pub struct Header {
     /// Trailing array of worker states.
     /// Length is `num_workers`.
     pub worker_states: [WorkerState; 0],
+    // trailing array of `SlabMeta` with size of `num_slabs`.
+    // each is sufficiently sized such that we can hold a
+    // `FreeStack` with size of 64 bytes + (slab_size / 256) u16s.
 }
 
 #[repr(C)]
 pub struct WorkerState {
     pub partial_slabs_heads: [CacheAlignedU32; NUM_SIZE_CLASSES],
     pub full_slabs_heads: [CacheAlignedU32; NUM_SIZE_CLASSES],
+}
+
+#[repr(C)]
+pub struct SlabMeta {
+    pub free_stack: FreeStack,
 }
 
 const NULL: u32 = u32::MAX;

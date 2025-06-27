@@ -56,6 +56,16 @@ impl FreeStack {
         self.stack.as_mut_ptr().add(usize::from(top)).write(item);
         self.top.store(top + 1, Ordering::Release);
     }
+
+    /// Returns the current top value - i.e. the size.
+    pub fn len(&self) -> u16 {
+        self.top.load(Ordering::Acquire)
+    }
+
+    /// Return a value at a specific index.
+    pub unsafe fn get(&self, index: u16) -> u16 {
+        self.stack.as_ptr().add(usize::from(index)).read()
+    }
 }
 
 #[cfg(test)]

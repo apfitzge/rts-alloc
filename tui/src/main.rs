@@ -196,6 +196,7 @@ impl Widget for &App {
             .constraints([
                 Constraint::Length(9),
                 Constraint::Length(12),
+                Constraint::Length(12),
                 Constraint::Length(5),
                 Constraint::Min(5),
             ])
@@ -203,10 +204,13 @@ impl Widget for &App {
 
         self.render_header(chunks[0], buf);
         self.render_workers(chunks[1], buf);
-        self.render_padding(chunks[2], buf);
-        self.render_slabs(chunks[3], buf);
+        self.render_slab_meta(chunks[2], buf);
+        self.render_padding(chunks[3], buf);
+        self.render_slabs(chunks[4], buf);
     }
 }
+
+const SLAB_WIDTH: u16 = 20;
 
 impl App {
     fn render_header(&self, area: Rect, buf: &mut Buffer) {
@@ -274,7 +278,7 @@ impl App {
             if (index == 0 && worker_index != 0)
                 || (index == (workers_per_row - 1) && worker_index != (num_workers - 1))
             {
-                self.render_worker_continuation(rect, buf);
+                self.render_continuation_block(rect, buf);
             } else {
                 self.render_worker(worker_index, rect, buf);
             }
@@ -319,12 +323,94 @@ impl App {
         table.render(area, buf);
     }
 
-    fn render_worker_continuation(&self, area: Rect, buf: &mut Buffer) {
-        let worker_block = Block::bordered().border_set(border::PLAIN);
-        let worker_value = Paragraph::new("...")
-            .block(worker_block)
-            .alignment(Alignment::Center);
-        worker_value.render(area, buf);
+    fn render_slab_meta(&self, area: Rect, buf: &mut Buffer) {
+        let header = self.allocator.header();
+        let slab_meta_block = Block::bordered()
+            .title(if matches!(self.selected_section, Section::Slabs) {
+                "Slabs Meta*"
+            } else {
+                "Slabs Meta"
+            })
+            .border_set(border::PLAIN);
+
+        let slabs_meta_inner = slab_meta_block.inner(area);
+        slab_meta_block.render(area, buf);
+        {
+            let area = &slabs_meta_inner;
+
+            let num_slabs = header.num_slabs as usize;
+            let slab_height = 7;
+            let slabs_per_row = usize::from(area.width / SLAB_WIDTH);
+
+            // We will have a partial view if the number of slabs
+            // is greater than the number of slabs that can fit in a row.
+            let (starting_index, ending_index) = if num_slabs > slabs_per_row {
+                // Adjust slab offset if necessary to avoid needing to scroll back many times.
+                let slab_offset = self.slab_offset.load(Ordering::Relaxed);
+                if slab_offset + slabs_per_row > num_slabs {
+                    self.slab_offset
+                        .store(num_slabs.saturating_sub(slabs_per_row), Ordering::Relaxed);
+                }
+                let slab_offset = self.slab_offset.load(Ordering::Relaxed);
+                (slab_offset, slab_offset + slabs_per_row)
+            } else {
+                (0, num_slabs)
+            };
+
+            for (index, slab_index) in (starting_index..ending_index).enumerate() {
+                let x = area.x + (index as u16 * SLAB_WIDTH);
+                let rect = Rect::new(x, area.y, SLAB_WIDTH, slab_height);
+
+                if (index == 0 && slab_index != 0)
+                    || (index == (slabs_per_row - 1) && slab_index != (num_slabs - 1))
+                {
+                    self.render_continuation_block(rect, buf);
+                } else {
+                    self.render_slab_meta_item(slab_index as u32, rect, buf);
+                }
+            }
+        }
+    }
+
+    // For each slab meta display the following in its' own block.
+    // - Slab Index (in title)
+    // - Free-Stack (in an inner block)
+    //    - Current length of the free stack
+    //    - Top value or "None" if empty
+    fn render_slab_meta_item(&self, slab_index: u32, area: Rect, buf: &mut Buffer) {
+        // Get the slab metadata (you may need unsafe if accessing shared memory)
+        let slab_meta = unsafe { self.allocator.slab_meta(slab_index).as_ref() };
+
+        let free_stack_len = slab_meta.free_stack.len();
+        let top_value = if free_stack_len > 0 {
+            Some(unsafe { slab_meta.free_stack.get(free_stack_len - 1) })
+        } else {
+            None
+        };
+
+        let free_stack_info = Paragraph::new(format!(
+            "len: {}\ntop: {}",
+            free_stack_len,
+            top_value.map_or("None".into(), |v| v.to_string())
+        ))
+        .block(
+            Block::bordered()
+                .title("Free Stack")
+                .border_set(border::PLAIN),
+        )
+        .alignment(Alignment::Left);
+
+        let outer_block = Block::bordered()
+            .title(format!("Slab Meta {}", slab_index))
+            .border_set(border::PLAIN);
+
+        // Render outer block
+        outer_block.clone().render(area, buf);
+
+        let inner_area = outer_block.inner(area);
+
+        // Render the inner content
+        free_stack_info.render(inner_area, buf);
     }
 
     fn render_padding(&self, area: Rect, buf: &mut Buffer) {
@@ -347,9 +433,8 @@ impl App {
             let area = &slabs_inner;
 
             let num_slabs = header.num_slabs as usize;
-            let slab_width = 14;
             let slab_height = 3;
-            let slabs_per_row = usize::from(area.width / slab_width);
+            let slabs_per_row = usize::from(area.width / SLAB_WIDTH);
 
             // We will have a partial view if the number of slabs
             // is greater than the number of slabs that can fit in a row.
@@ -367,13 +452,13 @@ impl App {
             };
 
             for (index, slab_index) in (starting_index..ending_index).enumerate() {
-                let x = area.x + (index as u16 * slab_width);
-                let rect = Rect::new(x, area.y, slab_width, slab_height);
+                let x = area.x + (index as u16 * SLAB_WIDTH);
+                let rect = Rect::new(x, area.y, SLAB_WIDTH, slab_height);
 
                 if (index == 0 && slab_index != 0)
                     || (index == (slabs_per_row - 1) && slab_index != (num_slabs - 1))
                 {
-                    self.render_slab_continuation(rect, buf);
+                    self.render_continuation_block(rect, buf);
                 } else {
                     self.render_slab(slab_index, rect, buf);
                 }
@@ -392,11 +477,11 @@ impl App {
         slab_value.render(area, buf);
     }
 
-    fn render_slab_continuation(&self, area: Rect, buf: &mut Buffer) {
-        let slab_block = Block::bordered().border_set(border::PLAIN);
-        let slab_value = Paragraph::new("...")
-            .block(slab_block)
+    fn render_continuation_block(&self, area: Rect, buf: &mut Buffer) {
+        let continuation_block = Block::bordered().border_set(border::PLAIN);
+        let continuation_value = Paragraph::new("...")
+            .block(continuation_block)
             .alignment(Alignment::Center);
-        slab_value.render(area, buf);
+        continuation_value.render(area, buf);
     }
 }
