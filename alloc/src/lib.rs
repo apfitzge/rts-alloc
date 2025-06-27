@@ -94,9 +94,11 @@ impl WorkerAssignedAllocator {
 
     pub unsafe fn free(&self, ptr: NonNull<u8>) {
         let offset = ptr.byte_offset_from_unsigned(self.allocator.header);
-        let offset_from_slab_start = offset - self.allocator.header().slab_offset as usize;
+        let offset_from_slab_section_start = offset - self.allocator.header().slab_offset as usize;
         let slab_index =
-            (offset_from_slab_start / self.allocator.header().slab_size as usize) as u32;
+            (offset_from_slab_section_start / self.allocator.header().slab_size as usize) as u32;
+        let offset_from_slab_start = offset_from_slab_section_start
+            - (slab_index as usize * self.allocator.header().slab_size as usize);
 
         // We now know the slab index - we can get the slab metadata.
         let slab_meta = unsafe { self.allocator.slab_meta(slab_index).as_mut() };
@@ -110,6 +112,13 @@ impl WorkerAssignedAllocator {
         let slab_size = self.allocator.header().slab_size as usize;
         let slab_size_class = SIZE_CLASSES[size_class_index];
         let allocation_index_in_slab = (offset_from_slab_start / slab_size_class as usize) as u16;
+
+        debug_assert!(
+            allocation_index_in_slab
+                < SlabMeta::capacity(slab_size as u32, slab_meta.size_class_index),
+            "allocation index is out of bounds for slab {slab_index}. Index={allocation_index_in_slab}, Capacity={}",
+            SlabMeta::capacity(slab_size as u32, slab_meta.size_class_index)
+        );
         let free_stack = &mut slab_meta.free_stack;
         free_stack.push(allocation_index_in_slab);
 
