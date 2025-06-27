@@ -289,7 +289,7 @@ impl App {
         let worker_block = Block::bordered()
             .title(format!("Worker {}", worker_index))
             .border_set(border::PLAIN);
-        let worker_state = unsafe { self.allocator.worker_state(worker_index as usize).as_ref() };
+        let worker_state = unsafe { self.allocator.worker_state(worker_index as u32).as_ref() };
 
         let rows = SIZE_CLASSES
             .iter()

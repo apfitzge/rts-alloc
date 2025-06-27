@@ -16,8 +16,8 @@ struct Args {
 
 #[derive(Clone, Debug, Subcommand)]
 enum SubCommand {
-    Allocate { worker_id: usize, size: u32 },
-    Free { worker_id: usize, offset: u32 },
+    Allocate { worker_id: u32, size: u32 },
+    Free { worker_id: u32, offset: u32 },
 }
 
 fn main() {
