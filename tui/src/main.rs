@@ -204,7 +204,7 @@ impl Widget for &App {
 
         self.render_header(chunks[0], buf);
         self.render_workers(chunks[1], buf);
-        self.render_slab_meta(chunks[2], buf);
+        self.render_slab_metas(chunks[2], buf);
         self.render_padding(chunks[3], buf);
         self.render_slabs(chunks[4], buf);
     }
@@ -323,7 +323,7 @@ impl App {
         table.render(area, buf);
     }
 
-    fn render_slab_meta(&self, area: Rect, buf: &mut Buffer) {
+    fn render_slab_metas(&self, area: Rect, buf: &mut Buffer) {
         let header = self.allocator.header();
         let slab_meta_block = Block::bordered()
             .title(if matches!(self.selected_section, Section::Slabs) {
@@ -366,19 +366,13 @@ impl App {
                 {
                     self.render_continuation_block(rect, buf);
                 } else {
-                    self.render_slab_meta_item(slab_index as u32, rect, buf);
+                    self.render_slab_meta(slab_index as u32, rect, buf);
                 }
             }
         }
     }
 
-    // For each slab meta display the following in its' own block.
-    // - Slab Index (in title)
-    // - Free-Stack (in an inner block)
-    //    - Current length of the free stack
-    //    - Top value or "None" if empty
-    fn render_slab_meta_item(&self, slab_index: u32, area: Rect, buf: &mut Buffer) {
-        // Get the slab metadata (you may need unsafe if accessing shared memory)
+    fn render_slab_meta(&self, slab_index: u32, area: Rect, buf: &mut Buffer) {
         let slab_meta = unsafe { self.allocator.slab_meta(slab_index).as_ref() };
 
         let free_stack_len = slab_meta.free_stack.len();
@@ -387,6 +381,28 @@ impl App {
         } else {
             None
         };
+
+        let next = slab_meta.next; // Assuming `next` is accessible like this
+
+        let outer_block = Block::bordered()
+            .title(format!("Slab Meta {}", slab_index))
+            .border_set(border::PLAIN);
+
+        // Render outer block
+        outer_block.clone().render(area, buf);
+
+        // Inner area inside the border
+        let inner_area = outer_block.inner(area);
+
+        // Split inner area into two vertical chunks:
+        // - Top: for `next: {}` line
+        // - Bottom: for the Free Stack block
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(inner_area);
+
+        let next_line = Paragraph::new(format!("next: {}\n", next)).alignment(Alignment::Left);
 
         let free_stack_info = Paragraph::new(format!(
             "len: {}\ntop: {}",
@@ -400,17 +416,11 @@ impl App {
         )
         .alignment(Alignment::Left);
 
-        let outer_block = Block::bordered()
-            .title(format!("Slab Meta {}", slab_index))
-            .border_set(border::PLAIN);
+        // Render "next: ..." line
+        next_line.render(chunks[0], buf);
 
-        // Render outer block
-        outer_block.clone().render(area, buf);
-
-        let inner_area = outer_block.inner(area);
-
-        // Render the inner content
-        free_stack_info.render(inner_area, buf);
+        // Render inner Free Stack block
+        free_stack_info.render(chunks[1], buf);
     }
 
     fn render_padding(&self, area: Rect, buf: &mut Buffer) {
@@ -470,11 +480,7 @@ impl App {
         let slab_block = Block::bordered()
             .title(format!("Slab {}", slab_index))
             .border_set(border::PLAIN);
-        let slab_value = unsafe { self.allocator.slab(slab_index as u32).cast::<u32>().read() };
-        let slab_value = Paragraph::new(slab_value.to_string())
-            .block(slab_block)
-            .alignment(Alignment::Center);
-        slab_value.render(area, buf);
+        slab_block.render(area, buf);
     }
 
     fn render_continuation_block(&self, area: Rect, buf: &mut Buffer) {

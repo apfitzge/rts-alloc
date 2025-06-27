@@ -37,14 +37,9 @@ impl Allocator {
         let worker = unsafe { self.worker_state(worker_index).as_ref() };
         let partial_head = &worker.partial_slabs_heads[size_class_index as usize];
         let current_head = partial_head.load(Ordering::Relaxed);
-        let slab = unsafe { self.slab(slab_index).cast::<u32>() };
-        unsafe { slab.write(current_head) };
-        partial_head.store(slab_index, Ordering::Relaxed);
 
-        // Initialize the slab metadata.
         let slab_meta = unsafe { self.slab_meta(slab_index).as_mut() };
-
-        // Reset the free stack for each slot in the slab.
+        slab_meta.next = current_head; // link the slab to the worker's partial list.
         unsafe {
             slab_meta
                 .free_stack
@@ -56,10 +51,9 @@ impl Allocator {
 
     /// Push a slab index onto the global free stack.
     pub unsafe fn return_the_slab(&self, index: u32) {
-        let slab = self.slab(index).cast::<u32>();
         loop {
             let current_head = self.header().global_free_stack.load(Ordering::Acquire);
-            slab.write(current_head);
+            unsafe { self.slab_meta(index).as_mut().next = current_head };
             if self
                 .header()
                 .global_free_stack
@@ -81,7 +75,7 @@ impl Allocator {
                 return None;
             }
 
-            let next_slab = unsafe { self.slab(current_head).cast::<u32>().read() };
+            let next_slab = unsafe { self.slab_meta(current_head).as_ref().next };
             if header
                 .global_free_stack
                 .compare_exchange(current_head, next_slab, Ordering::AcqRel, Ordering::Acquire)
@@ -274,6 +268,7 @@ pub struct WorkerState {
 
 #[repr(C)]
 pub struct SlabMeta {
+    pub next: u32, // used for intrusive linked-lists
     pub free_stack: FreeStack,
 }
 
