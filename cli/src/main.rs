@@ -16,21 +16,8 @@ struct Args {
 
 #[derive(Clone, Debug, Subcommand)]
 enum SubCommand {
-    TakeFreeSlab {
-        worker_id: usize,
-        size_class_index: usize,
-    },
-    ReturnTheSlab {
-        slab_index: u32,
-    },
-    Allocate {
-        worker_id: usize,
-        size: u32,
-    },
-    Free {
-        worker_id: usize,
-        offset: u32,
-    },
+    Allocate { worker_id: usize, size: u32 },
+    Free { worker_id: usize, offset: u32 },
 }
 
 fn main() {
@@ -46,23 +33,6 @@ fn main() {
     };
 
     match args.subcommand {
-        SubCommand::TakeFreeSlab {
-            worker_id,
-            size_class_index,
-        } => {
-            if allocator.take_free_slab(worker_id, size_class_index) {
-                println!(
-                    "Worker {} popped slab with size class {}",
-                    worker_id, size_class_index
-                );
-            } else {
-                eprintln!("Failed to take free slab");
-            }
-        }
-        SubCommand::ReturnTheSlab { slab_index } => {
-            unsafe { allocator.return_the_slab(slab_index) };
-            println!("Returned slab index: {}", slab_index);
-        }
         SubCommand::Allocate { worker_id, size } => {
             let allocator = WorkerAssignedAllocator::new(allocator, worker_id);
             match allocator.allocate(size) {
