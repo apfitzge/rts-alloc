@@ -18,6 +18,7 @@ struct Args {
 enum SubCommand {
     Allocate { worker_id: u32, size: u32 },
     Free { worker_id: u32, offset: u32 },
+    ClearWorker { worker_id: u32 },
     Simulate { worker_id: u32 },
 }
 
@@ -69,6 +70,10 @@ fn main() {
                 "Worker {} freed memory at offset {} (0x{:x})",
                 worker_id, offset, offset
             );
+        }
+        SubCommand::ClearWorker { worker_id } => {
+            allocator.clear_worker(worker_id);
+            println!("Worker {} cleared its allocations", worker_id);
         }
         SubCommand::Simulate { worker_id } => {
             let allocator = WorkerAssignedAllocator::new(allocator, worker_id);

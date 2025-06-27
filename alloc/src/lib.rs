@@ -163,6 +163,31 @@ impl Allocator {
         return true;
     }
 
+    pub fn clear_worker(&self, worker_index: u32) {
+        let worker_state = unsafe { self.worker_state(worker_index).as_mut() };
+        for size_index in 0..NUM_SIZE_CLASSES {
+            let partial_head = &worker_state.partial_slabs_heads[size_index];
+            let mut current_head = partial_head.load(Ordering::Acquire);
+            while current_head != NULL {
+                unsafe {
+                    worker_local_list::remove_slab_from_list(self, partial_head, current_head);
+                    global_free_stack::return_the_slab(self, current_head);
+                }
+                current_head = partial_head.load(Ordering::Acquire);
+            }
+
+            let full_head = &worker_state.full_slabs_heads[size_index];
+            let mut current_head = full_head.load(Ordering::Acquire);
+            while current_head != NULL {
+                unsafe {
+                    worker_local_list::remove_slab_from_list(self, full_head, current_head);
+                    global_free_stack::return_the_slab(self, current_head);
+                }
+                current_head = full_head.load(Ordering::Acquire);
+            }
+        }
+    }
+
     /// Given a slab index, return a pointer to the slab metadata.
     pub unsafe fn slab_meta(&self, index: u32) -> NonNull<SlabMeta> {
         let header = self.header();
