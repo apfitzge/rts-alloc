@@ -15,6 +15,7 @@ use crate::{
 mod align;
 pub mod cache_aligned;
 pub mod free_stack;
+pub mod remote_free_stack;
 pub mod size_classes;
 
 pub struct WorkerAssignedAllocator {
