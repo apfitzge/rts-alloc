@@ -1,7 +1,7 @@
 use std::{path::PathBuf, time::Instant};
 
 use clap::{Parser, Subcommand};
-use rts_alloc::WorkerAssignedAllocator;
+use rts_alloc::{size_classes::SIZE_CLASSES, WorkerAssignedAllocator};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -16,11 +16,26 @@ struct Args {
 
 #[derive(Clone, Debug, Subcommand)]
 enum SubCommand {
-    Allocate { worker_id: u32, size: u32 },
-    Free { worker_id: u32, offset: u32 },
-    ClearWorker { worker_id: u32 },
-    Simulate { worker_id: u32 },
-    SimulateRemoteFree { allocate: u32, free: u32 },
+    Allocate {
+        worker_id: u32,
+        size: u32,
+    },
+    Free {
+        worker_id: u32,
+        offset: u32,
+    },
+    ClearWorker {
+        worker_id: u32,
+    },
+    Simulate {
+        worker_id: u32,
+        #[clap(long, default_value_t = false)]
+        hold_slabs: bool,
+    },
+    SimulateRemoteFree {
+        allocate: u32,
+        free: u32,
+    },
 }
 
 fn main() {
@@ -76,8 +91,19 @@ fn main() {
             allocator.clear_worker(worker_id);
             println!("Worker {} cleared its allocations", worker_id);
         }
-        SubCommand::Simulate { worker_id } => {
+        SubCommand::Simulate {
+            worker_id,
+            hold_slabs,
+        } => {
             let allocator = WorkerAssignedAllocator::new(allocator, worker_id);
+            allocator.allocator.clear_worker(worker_id);
+            if hold_slabs {
+                // Allocate one per size-class to hold slabs without returning them
+                // in the loop below.
+                for size in SIZE_CLASSES {
+                    let _ = allocator.allocate(size);
+                }
+            }
 
             // Choose an arbitrary rotation of sizes to allocate in a loop, then free them.
             let sizes = [
