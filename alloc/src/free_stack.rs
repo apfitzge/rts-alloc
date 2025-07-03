@@ -18,7 +18,7 @@ impl FreeStack {
     /// # Safety
     /// Trailing array must be allocated with at least `capacity` elements.
     pub unsafe fn reset(&mut self, capacity: u16) {
-        self.top.store(capacity, Ordering::Release);
+        self.top.store(capacity, Ordering::Relaxed);
         // Initialize the stack in reverse sequential order.
         let stack = self.stack.as_mut_ptr();
         for index in 0..capacity {
@@ -29,7 +29,7 @@ impl FreeStack {
     /// Pops an item from the free stack.
     /// Returns `None` if the stack is empty.
     pub fn pop(&self) -> Option<u16> {
-        let top = self.top.load(Ordering::Acquire);
+        let top = self.top.load(Ordering::Relaxed);
         if top == 0 {
             return None;
         }
@@ -42,7 +42,7 @@ impl FreeStack {
         let popped_value = unsafe { self.stack.as_ptr().add(usize::from(new_top)).read() };
 
         // Update the top of the stack.
-        self.top.store(new_top, Ordering::Release);
+        self.top.store(new_top, Ordering::Relaxed);
 
         Some(popped_value)
     }
@@ -52,14 +52,14 @@ impl FreeStack {
     /// The item must be a valid index into the stack.
     /// The stack must not be full.
     pub unsafe fn push(&mut self, item: u16) {
-        let top = self.top.load(Ordering::Acquire);
+        let top = self.top.load(Ordering::Relaxed);
         self.stack.as_mut_ptr().add(usize::from(top)).write(item);
-        self.top.store(top + 1, Ordering::Release);
+        self.top.store(top + 1, Ordering::Relaxed);
     }
 
     /// Returns the current top value - i.e. the size.
     pub fn len(&self) -> u16 {
-        self.top.load(Ordering::Acquire)
+        self.top.load(Ordering::Relaxed)
     }
 
     /// Returns true if the stack is empty.
