@@ -14,8 +14,24 @@ struct Args {
     subcommand: SubCommand,
 }
 
+const DEFAULT_SLAB_SIZE: u32 = 2 * 1024 * 1024; // 2 MiB
+
 #[derive(Clone, Debug, Subcommand)]
 enum SubCommand {
+    Create {
+        /// The number of workers.
+        #[clap(long)]
+        num_workers: u32,
+        /// The total size of the allocator.
+        #[clap(long)]
+        file_size: usize,
+        /// The size of each slab.
+        #[clap(long, default_value_t = DEFAULT_SLAB_SIZE)]
+        slab_size: u32,
+        /// Delete existing file if present.
+        #[clap(long, default_value_t = false)]
+        delete_existing: bool,
+    },
     Allocate {
         worker_id: u32,
         size: u32,
@@ -35,23 +51,43 @@ enum SubCommand {
     SimulateRemoteFree {
         allocate: u32,
         free: u32,
+        #[clap(long, default_value_t = false)]
+        hold_slabs: bool,
     },
 }
 
 fn main() {
     let args = Args::parse();
 
-    // Join the allocator.
-    let allocator = match rts_alloc::join_allocator(args.path) {
-        Ok(allocator) => allocator,
-        Err(e) => {
-            eprintln!("Failed to join allocator: {:?}", e);
-            return;
-        }
-    };
-
     match args.subcommand {
+        SubCommand::Create {
+            num_workers,
+            file_size,
+            slab_size,
+            delete_existing,
+        } => {
+            if delete_existing && args.path.exists() {
+                if let Err(e) = std::fs::remove_file(&args.path) {
+                    eprintln!("Failed to delete existing allocator file: {:?}", e);
+                    return;
+                }
+            }
+            match rts_alloc::create_allocator(args.path, num_workers, slab_size, file_size) {
+                Ok(allocator) => allocator,
+                Err(e) => {
+                    eprintln!("Failed to create allocator: {:?}", e);
+                    return;
+                }
+            };
+        }
         SubCommand::Allocate { worker_id, size } => {
+            let allocator = match rts_alloc::join_allocator(args.path) {
+                Ok(allocator) => allocator,
+                Err(e) => {
+                    eprintln!("Failed to join allocator: {:?}", e);
+                    return;
+                }
+            };
             let allocator = WorkerAssignedAllocator::new(allocator, worker_id);
             match allocator.allocate(size) {
                 Some(ptr) => {
@@ -71,6 +107,14 @@ fn main() {
             }
         }
         SubCommand::Free { worker_id, offset } => {
+            // Join the allocator.
+            let allocator = match rts_alloc::join_allocator(args.path) {
+                Ok(allocator) => allocator,
+                Err(e) => {
+                    eprintln!("Failed to join allocator: {:?}", e);
+                    return;
+                }
+            };
             let allocator = WorkerAssignedAllocator::new(allocator, worker_id);
             let ptr = unsafe {
                 allocator
@@ -88,6 +132,14 @@ fn main() {
             );
         }
         SubCommand::ClearWorker { worker_id } => {
+            // Join the allocator.
+            let allocator = match rts_alloc::join_allocator(args.path) {
+                Ok(allocator) => allocator,
+                Err(e) => {
+                    eprintln!("Failed to join allocator: {:?}", e);
+                    return;
+                }
+            };
             allocator.clear_worker(worker_id);
             println!("Worker {} cleared its allocations", worker_id);
         }
@@ -95,6 +147,14 @@ fn main() {
             worker_id,
             hold_slabs,
         } => {
+            // Join the allocator.
+            let allocator = match rts_alloc::join_allocator(args.path) {
+                Ok(allocator) => allocator,
+                Err(e) => {
+                    eprintln!("Failed to join allocator: {:?}", e);
+                    return;
+                }
+            };
             let allocator = WorkerAssignedAllocator::new(allocator, worker_id);
             allocator.allocator.clear_worker(worker_id);
             if hold_slabs {
@@ -111,14 +171,14 @@ fn main() {
                 2255, 3989, 777, 144,
             ];
             let mut allocations = Vec::with_capacity(sizes.len());
-            let mut num_allocated = 0;
-            let mut bytes_allocated = 0;
+            let mut num_allocated = 0u64;
+            let mut bytes_allocated = 0u64;
             let mut now = Instant::now();
             loop {
                 for size in sizes {
                     if let Some(ptr) = allocator.allocate(size) {
                         num_allocated += 1;
-                        bytes_allocated += size;
+                        bytes_allocated += u64::from(size);
                         allocations.push(ptr);
                     }
                 }
@@ -141,17 +201,40 @@ fn main() {
                 }
             }
         }
-        SubCommand::SimulateRemoteFree { allocate, free } => {
+        SubCommand::SimulateRemoteFree {
+            allocate,
+            free,
+            hold_slabs,
+        } => {
+            // Join the allocator.
+            let allocator = match rts_alloc::join_allocator(args.path) {
+                Ok(allocator) => allocator,
+                Err(e) => {
+                    eprintln!("Failed to join allocator: {:?}", e);
+                    return;
+                }
+            };
+
             // HACK: change the worker_id of this assigned allocator to simulate remote frees.
             let mut allocator = WorkerAssignedAllocator::new(allocator, allocate);
+
+            allocator.allocator.clear_worker(allocate);
+            if hold_slabs {
+                // Allocate one per size-class to hold slabs without returning them
+                // in the loop below.
+                for size in SIZE_CLASSES {
+                    let _ = allocator.allocate(size);
+                }
+            }
+
             // Choose an arbitrary rotation of sizes to allocate in a loop, then free them.
             let sizes = [
                 3521, 2186, 171, 2967, 347, 2011, 1552, 3900, 3124, 3857, 1190, 1427, 2856, 2484,
                 2255, 3989, 777, 144,
             ];
             let mut allocations = Vec::with_capacity(sizes.len());
-            let mut num_allocated = 0;
-            let mut bytes_allocated = 0;
+            let mut num_allocated = 0u64;
+            let mut bytes_allocated = 0u64;
             let mut now = Instant::now();
             loop {
                 allocator.worker_index = allocate;
@@ -161,7 +244,7 @@ fn main() {
                 for size in sizes {
                     if let Some(ptr) = allocator.allocate(size) {
                         num_allocated += 1;
-                        bytes_allocated += size;
+                        bytes_allocated += u64::from(size);
                         allocations.push(ptr);
                     } else {
                         full = true;
