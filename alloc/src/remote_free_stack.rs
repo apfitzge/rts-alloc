@@ -20,27 +20,27 @@ impl RemoteFreeStack {
     /// Returns an iterator over the indices that were in the stack.
     pub unsafe fn drain(
         &self,
-        slab_size: u32,
+        slab_item_size: u32,
         slab_ptr: *const u8,
     ) -> impl Iterator<Item = u32> + '_ {
         let current = self.head.swap(NULL, Ordering::AcqRel);
         RemoteFreeStackIter {
             current,
-            slab_size,
+            slab_item_size,
             slab_ptr,
         }
     }
 
     /// Pushes an item onto the remote free stack.
-    pub unsafe fn push(&self, item: u32, slab_size: u32, slab_ptr: *mut u8) {
-        let pushed_slab = slab_ptr
-            .add(item as usize * slab_size as usize)
+    pub unsafe fn push(&self, item: u32, slab_item_size: u32, slab_ptr: *mut u8) {
+        let pushed_slot = slab_ptr
+            .byte_add(item as usize * slab_item_size as usize)
             .cast::<u32>();
         loop {
             // Write the current head to the slab at the item index.
             let current = self.head.load(Ordering::Acquire);
             unsafe {
-                pushed_slab.write(current);
+                pushed_slot.write(current);
             }
 
             // Attempt to set the head to the item index using CAS.
@@ -58,7 +58,7 @@ impl RemoteFreeStack {
 
 pub struct RemoteFreeStackIter {
     current: u32,
-    slab_size: u32,
+    slab_item_size: u32,
     slab_ptr: *const u8,
 }
 
@@ -71,21 +71,19 @@ impl Iterator for RemoteFreeStackIter {
         }
 
         // Read the current value and move to the next.
-        let currnet = self.current;
+        let current = self.current;
         let next = unsafe {
             let next_ptr = self
                 .slab_ptr
-                .add(self.current as usize * self.slab_size as usize);
-            // Treat the next slab slot as an AtomicU16 (intrusive linked list) - read the value as next.
-            (next_ptr as *const CacheAlignedU32)
-                .read()
-                .load(Ordering::Acquire)
+                .add(self.current as usize * self.slab_item_size as usize);
+            // Treat the next slab slot as an u32 (intrusive linked list) - read the value as next.
+            (next_ptr as *const u32).read()
         };
 
         // Update the current to the next value.
         self.current = next;
 
-        Some(currnet)
+        Some(current)
     }
 }
 

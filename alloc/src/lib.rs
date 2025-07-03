@@ -42,8 +42,8 @@ impl WorkerAssignedAllocator {
         // Check if there is a partial slab available for this size class.
         let worker = unsafe { self.allocator.worker_state(self.worker_index).as_ref() };
         let partial_head = &worker.partial_slabs_heads[size_class_index as usize];
-        let mut allocation_slab_index = partial_head.load(Ordering::Acquire);
-        if allocation_slab_index == NULL {
+        let mut slab_index = partial_head.load(Ordering::Acquire);
+        if slab_index == NULL {
             // No partial slab available, try to take a free slab.
             if !self
                 .allocator
@@ -51,17 +51,14 @@ impl WorkerAssignedAllocator {
             {
                 return None; // No free slab available.
             }
-            allocation_slab_index = partial_head.load(Ordering::Acquire);
+            slab_index = partial_head.load(Ordering::Acquire);
         }
 
         // At this point, we have a partial slab available.
-        debug_assert_ne!(
-            allocation_slab_index, NULL,
-            "partial slab head should not be NULL"
-        );
+        debug_assert_ne!(slab_index, NULL, "partial slab head should not be NULL");
 
         // Pop an item from the free stack of the slab.
-        let slab_meta = unsafe { self.allocator.slab_meta(allocation_slab_index).as_mut() };
+        let slab_meta = unsafe { self.allocator.slab_meta(slab_index).as_mut() };
         let free_stack = &mut slab_meta.free_stack;
         let allocation_index_in_slab = free_stack
             .pop()
@@ -74,7 +71,7 @@ impl WorkerAssignedAllocator {
                 worker_local_list::remove_slab_from_list(
                     &self.allocator,
                     &worker.partial_slabs_heads[size_class_index as usize],
-                    allocation_slab_index,
+                    slab_index,
                 );
             }
 
@@ -83,19 +80,22 @@ impl WorkerAssignedAllocator {
                 worker_local_list::push_slab_into_list(
                     &self.allocator,
                     &worker.full_slabs_heads[size_class_index as usize],
-                    allocation_slab_index,
+                    slab_index,
                 );
             }
         }
 
-        let slab = unsafe { self.allocator.slab(allocation_slab_index) };
+        let slab = unsafe { self.allocator.slab(slab_index) };
         let offset = usize::from(allocation_index_in_slab)
             * SIZE_CLASSES[size_class_index as usize] as usize;
-        Some(unsafe { slab.add(offset) })
+        let ptr = unsafe { slab.byte_add(offset) };
+
+        Some(ptr)
     }
 
     pub unsafe fn free(&self, ptr: NonNull<u8>) {
-        let offset = ptr.byte_offset_from_unsigned(self.allocator.header);
+        let offset = self.allocator.ptr_to_offset(ptr);
+
         let offset_from_slab_section_start = offset - self.allocator.header().slab_offset as usize;
         let slab_index =
             (offset_from_slab_section_start / self.allocator.header().slab_size as usize) as u32;
@@ -105,7 +105,6 @@ impl WorkerAssignedAllocator {
         // We now know the slab index - we can get the slab metadata.
         let slab_meta = unsafe { self.allocator.slab_meta(slab_index).as_mut() };
         let size_class_index = slab_meta.size_class_index as usize;
-        let slab_size = self.allocator.header().slab_size;
         let slab_size_class = SIZE_CLASSES[size_class_index];
         let allocation_index_in_slab = (offset_from_slab_start / slab_size_class as usize) as u16;
 
@@ -113,7 +112,7 @@ impl WorkerAssignedAllocator {
         if slab_meta.assigned_worker != self.worker_index as u32 {
             slab_meta.remote_free_stack.push(
                 u32::from(allocation_index_in_slab),
-                slab_size,
+                slab_size_class,
                 unsafe { self.allocator.slab(slab_index).as_ptr() },
             );
             return;
@@ -214,6 +213,14 @@ impl Allocator {
         unsafe { self.header.as_ref() }
     }
 
+    pub unsafe fn ptr_to_offset(&self, ptr: NonNull<u8>) -> usize {
+        ptr.byte_offset_from_unsigned(self.header)
+    }
+
+    pub unsafe fn offset_to_ptr(&self, offset: usize) -> NonNull<u8> {
+        self.header.byte_add(offset).cast()
+    }
+
     /// Take a free slab for the worker, for a specific size class.
     pub fn take_free_slab(&self, worker_index: u32, size_class_index: u8) -> bool {
         let Some(slab_index) = global_free_stack::try_pop_free_slab(self) else {
@@ -264,9 +271,9 @@ impl Allocator {
     /// Should only be called by the worker that owns the slab.
     pub unsafe fn drain_remote_frees(&self, slab_index: u32) -> impl Iterator<Item = u32> + '_ {
         let slab_meta = unsafe { self.slab_meta(slab_index).as_mut() };
-        let slab_size = self.header().slab_size;
+        let slab_item_size = SIZE_CLASSES[usize::from(slab_meta.size_class_index)];
         let slab_ptr = unsafe { self.slab(slab_index).as_ptr() };
-        slab_meta.remote_free_stack.drain(slab_size, slab_ptr)
+        slab_meta.remote_free_stack.drain(slab_item_size, slab_ptr)
     }
 
     /// Given a slab index, return a pointer to the slab metadata.
@@ -274,8 +281,8 @@ impl Allocator {
         let header = self.header();
         self.header
             .cast::<u8>()
-            .add(header.slab_meta_offset as usize)
-            .add(index as usize * header.slab_meta_size as usize)
+            .byte_add(header.slab_meta_offset as usize)
+            .byte_add(index as usize * header.slab_meta_size as usize)
             .cast()
     }
 
@@ -284,8 +291,8 @@ impl Allocator {
         let header = self.header();
         self.header
             .cast::<u8>()
-            .add(header.slab_offset as usize)
-            .add((index * header.slab_size) as usize)
+            .byte_add(header.slab_offset as usize)
+            .byte_add((index * header.slab_size) as usize)
     }
 
     /// Given a worker index, return a pointer to the worker state.
