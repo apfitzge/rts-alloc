@@ -543,7 +543,7 @@ mod worker_local_list {
         head: &CacheAlignedU32,
         slab_index: u32,
     ) {
-        let current_head = head.load(Ordering::Acquire);
+        let current_head = head.load(Ordering::Relaxed);
         let slab_meta = unsafe { allocator.slab_meta(slab_index).as_mut() };
 
         slab_meta.prev = NULL; // no previous slab in the list.
@@ -555,7 +555,7 @@ mod worker_local_list {
             current_head_meta.prev = slab_index; // link the current head to the new slab.
         }
 
-        head.store(slab_index, Ordering::Release);
+        head.store(slab_index, Ordering::Relaxed);
     }
 
     /// Remove a slab from a specific list, given the head.
@@ -564,7 +564,7 @@ mod worker_local_list {
         head: &CacheAlignedU32,
         slab_index: u32,
     ) {
-        let current_head = head.load(Ordering::Acquire);
+        let current_head = head.load(Ordering::Relaxed);
         debug_assert_ne!(
             current_head, NULL,
             "List head should not be NULL, since we're removing a slab"
@@ -574,7 +574,7 @@ mod worker_local_list {
             // Link head to the next slab.
             let slab_meta = unsafe { allocator.slab_meta(slab_index).as_mut() };
             let next_slab_index = slab_meta.next;
-            head.store(next_slab_index, Ordering::Release);
+            head.store(next_slab_index, Ordering::Relaxed);
         }
         unlink_slab_from_list(allocator, slab_index);
     }
