@@ -5,4 +5,4 @@ version.workspace = true
 
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
-rts-alloc = { workspace = true}
+rts-alloc = { workspace = true }
