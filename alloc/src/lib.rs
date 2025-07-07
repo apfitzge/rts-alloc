@@ -9,11 +9,10 @@ use crate::{
     align::round_to_next_alignment_of,
     cache_aligned::CacheAligned,
     error::Error,
-    free_stack::FreeStack,
     header::{Header, MAGIC, VERSION},
     index::NULL_U32,
-    remote_free_stack::RemoteFreeStack,
     size_classes::{size_class_index, MAX_SIZE, MIN_SIZE, NUM_SIZE_CLASSES, SIZE_CLASSES},
+    slab_meta::SlabMeta,
     worker_state::WorkerState,
 };
 
@@ -25,6 +24,7 @@ pub mod header;
 pub mod index;
 pub mod remote_free_stack;
 pub mod size_classes;
+pub mod slab_meta;
 pub mod worker_state;
 
 pub struct WorkerAssignedAllocator {
@@ -460,33 +460,6 @@ pub fn join_allocator(file_path: impl AsRef<Path>) -> Result<Allocator, Error> {
     let header_ptr = mmap as *mut Header;
     let header = NonNull::new(header_ptr).expect("mmap cannot be null after map_failed check");
     Ok(Allocator { header })
-}
-
-#[repr(C)]
-pub struct SlabMeta {
-    pub prev: u32,            // used for intrusive linked-lists (worker_local)
-    pub next: u32,            // used for intrusive linked-lists (global_free_stack, worker_local)
-    pub assigned_worker: u32, // worker assigned to this slab (if any)
-    pub size_class_index: u8, // index into SIZE_CLASSES
-    pub remote_free_stack: RemoteFreeStack,
-    pub free_stack: FreeStack,
-}
-
-impl SlabMeta {
-    pub fn assign(&mut self, slab_size: u32, worker: u32, size_class_index: u8) {
-        self.assigned_worker = worker;
-        self.size_class_index = size_class_index;
-        self.remote_free_stack.reset();
-        unsafe {
-            self.free_stack
-                .reset(Self::capacity(slab_size, size_class_index));
-        }
-    }
-
-    fn capacity(slab_size: u32, size_class_index: u8) -> u16 {
-        let size_class = SIZE_CLASSES[size_class_index as usize];
-        (slab_size / size_class) as u16
-    }
 }
 
 // Includes all functions related to modifying the global free stack.
