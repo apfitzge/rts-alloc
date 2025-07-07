@@ -11,6 +11,7 @@ use crate::{
     error::Error,
     header::{Header, MAGIC, VERSION},
     index::NULL_U32,
+    raw_allocator::RawAllocator,
     size_classes::{size_class_index, MAX_SIZE, MIN_SIZE, NUM_SIZE_CLASSES, SIZE_CLASSES},
     slab_meta::SlabMeta,
     worker_state::WorkerState,
@@ -22,18 +23,19 @@ pub mod error;
 pub mod free_stack;
 pub mod header;
 pub mod index;
+pub mod raw_allocator;
 pub mod remote_free_stack;
 pub mod size_classes;
 pub mod slab_meta;
 pub mod worker_state;
 
 pub struct WorkerAssignedAllocator {
-    pub allocator: Allocator,
+    pub allocator: RawAllocator,
     pub worker_index: u32,
 }
 
 impl WorkerAssignedAllocator {
-    pub fn new(allocator: Allocator, worker_index: u32) -> Self {
+    pub fn new(allocator: RawAllocator, worker_index: u32) -> Self {
         assert!(worker_index < allocator.header().num_workers);
         WorkerAssignedAllocator {
             allocator,
@@ -216,138 +218,12 @@ impl WorkerAssignedAllocator {
     }
 }
 
-pub struct Allocator {
-    pub header: NonNull<Header>,
-}
-
-impl Allocator {
-    pub fn header(&self) -> &Header {
-        unsafe { self.header.as_ref() }
-    }
-
-    /// Convert a pointer to an offset from the start of the header.
-    ///
-    /// # Safety
-    /// - `ptr` must be greater than or equal to the `header` pointer.
-    pub unsafe fn ptr_to_offset(&self, ptr: NonNull<u8>) -> usize {
-        ptr.byte_offset_from_unsigned(self.header)
-    }
-
-    /// Convert an offset to a pointer from the start of the header.
-    ///
-    /// # Safety
-    /// - `offset` should be less than the size of the allocator to avoid
-    ///   out-of-bounds access.
-    pub unsafe fn offset_to_ptr(&self, offset: usize) -> NonNull<u8> {
-        self.header.byte_add(offset).cast()
-    }
-
-    /// Take a free slab for the worker, for a specific size class.
-    pub fn take_free_slab(&self, worker_index: u32, size_class_index: u8) -> bool {
-        let Some(slab_index) = global_free_stack::try_pop_free_slab(self) else {
-            return false;
-        };
-
-        // No other worker should be touching this workers partial/full lists.
-        // No need to do a CAS, since there should not be contention.
-        let worker = unsafe { self.worker_state(worker_index).as_ref() };
-        let partial_head = &worker.partial_slabs_heads[usize::from(size_class_index)];
-        unsafe {
-            worker_local_list::push_slab_into_list(self, partial_head, slab_index);
-        }
-
-        // The slab is now part of the worker's partial list.
-        // Now set up the slab's metadata to reflect this.
-        let slab_meta = unsafe { self.slab_meta(slab_index).as_mut() };
-        slab_meta.assign(self.header().slab_size, worker_index, size_class_index);
-
-        true
-    }
-
-    pub fn clear_worker(&self, worker_index: u32) {
-        let worker_state = unsafe { self.worker_state(worker_index).as_mut() };
-        for size_index in 0..NUM_SIZE_CLASSES {
-            let partial_head = &worker_state.partial_slabs_heads[size_index];
-            let mut current_head = partial_head.load(Ordering::Acquire);
-            while current_head != NULL_U32 {
-                unsafe {
-                    worker_local_list::remove_slab_from_list(self, partial_head, current_head);
-                    global_free_stack::return_the_slab(self, current_head);
-                }
-                current_head = partial_head.load(Ordering::Acquire);
-            }
-
-            let full_head = &worker_state.full_slabs_heads[size_index];
-            let mut current_head = full_head.load(Ordering::Acquire);
-            while current_head != NULL_U32 {
-                unsafe {
-                    worker_local_list::remove_slab_from_list(self, full_head, current_head);
-                    global_free_stack::return_the_slab(self, current_head);
-                }
-                current_head = full_head.load(Ordering::Acquire);
-            }
-        }
-    }
-
-    /// Should only be called by the worker that owns the slab.
-    ///
-    /// # Safety
-    /// - The `slab_index` must be less than the number of slabs in the allocator.
-    /// - The `slab_index` must be owned by the worker calling this function.
-    pub unsafe fn drain_remote_frees(&self, slab_index: u32) -> impl Iterator<Item = u32> + '_ {
-        let slab_meta = unsafe { self.slab_meta(slab_index).as_mut() };
-        let slab_item_size = SIZE_CLASSES[usize::from(slab_meta.size_class_index)];
-        let slab_ptr = unsafe { self.slab(slab_index).as_ptr() };
-        slab_meta.remote_free_stack.drain(slab_item_size, slab_ptr)
-    }
-
-    /// Given a slab index, return a pointer to the slab metadata.
-    ///
-    /// # Safety
-    /// - The `slab_index` must be less than the number of slabs in the allocator.
-    pub unsafe fn slab_meta(&self, slab_index: u32) -> NonNull<SlabMeta> {
-        let header = self.header();
-        self.header
-            .cast::<u8>()
-            .byte_add(header.slab_meta_offset as usize)
-            .byte_add(slab_index as usize * header.slab_meta_size as usize)
-            .cast()
-    }
-
-    /// Given a slab index, return a pointer to the slab memory.
-    ///
-    /// # Safety
-    /// - The `slab_index` must be less than the number of slabs in the allocator.
-    pub unsafe fn slab(&self, slab_index: u32) -> NonNull<u8> {
-        let header = self.header();
-        self.header
-            .cast::<u8>()
-            .byte_add(header.slab_offset as usize)
-            .byte_add((slab_index * header.slab_size) as usize)
-    }
-
-    /// Given a worker index, return a pointer to the worker state.
-    ///
-    /// # Safety
-    /// - The `worker_index` must be less than the number of workers in the allocator.
-    pub unsafe fn worker_state(&self, worker_index: u32) -> NonNull<WorkerState> {
-        let header = self.header();
-        let worker_states_ptr = header.worker_states.as_ptr();
-
-        // SAFETY: The `worker_index` must be less than `num_workers`.
-        let worker_state_ptr = unsafe { worker_states_ptr.add(worker_index as usize) };
-
-        // SAFETY: The `worker_state_ptr` is not null.
-        NonNull::new(worker_state_ptr.cast_mut()).expect("Worker state pointer should not be null")
-    }
-}
-
 pub fn create_allocator(
     file_path: impl AsRef<Path>,
     num_workers: u32,
     slab_size: u32,
     size: usize,
-) -> Result<Allocator, Error> {
+) -> Result<RawAllocator, Error> {
     if !slab_size.is_power_of_two() {
         return Err(Error::InvalidSlabSize);
     }
@@ -410,7 +286,7 @@ pub fn create_allocator(
         header.as_mut().global_free_stack = CacheAligned(AtomicU32::new(NULL_U32));
     }
 
-    let allocator = Allocator { header };
+    let allocator = RawAllocator { header };
     // Initialize slabs in the global free stack.
     for index in (0..num_slabs).rev() {
         unsafe { global_free_stack::return_the_slab(&allocator, index) };
@@ -429,10 +305,10 @@ pub fn create_allocator(
         }
     }
 
-    Ok(Allocator { header })
+    Ok(RawAllocator { header })
 }
 
-pub fn join_allocator(file_path: impl AsRef<Path>) -> Result<Allocator, Error> {
+pub fn join_allocator(file_path: impl AsRef<Path>) -> Result<RawAllocator, Error> {
     let file_path = file_path.as_ref();
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -459,17 +335,17 @@ pub fn join_allocator(file_path: impl AsRef<Path>) -> Result<Allocator, Error> {
 
     let header_ptr = mmap as *mut Header;
     let header = NonNull::new(header_ptr).expect("mmap cannot be null after map_failed check");
-    Ok(Allocator { header })
+    Ok(RawAllocator { header })
 }
 
 // Includes all functions related to modifying the global free stack.
 // These are internal functions that should be used by the allocator only.
 mod global_free_stack {
-    use crate::{Allocator, NULL_U32};
+    use crate::{RawAllocator, NULL_U32};
     use std::sync::atomic::Ordering;
 
     /// Push a slab index onto the global free stack.
-    pub unsafe fn return_the_slab(allocator: &Allocator, index: u32) {
+    pub unsafe fn return_the_slab(allocator: &RawAllocator, index: u32) {
         loop {
             let current_head = allocator.header().global_free_stack.load(Ordering::Acquire);
             let slab_meta = unsafe { allocator.slab_meta(index).as_mut() };
@@ -489,7 +365,7 @@ mod global_free_stack {
 
     /// Try to pop a free slab index from the global free stack.
     /// Returns `None` if the stack is empty.
-    pub fn try_pop_free_slab(allocator: &Allocator) -> Option<u32> {
+    pub fn try_pop_free_slab(allocator: &RawAllocator) -> Option<u32> {
         let header = allocator.header();
         loop {
             let current_head = header.global_free_stack.load(Ordering::Acquire);
@@ -513,12 +389,12 @@ mod global_free_stack {
 // These are internal functions that should be used by the allocator only,
 // and more specifically should only be called by the assigned worker.
 mod worker_local_list {
-    use crate::{cache_aligned::CacheAlignedU32, Allocator, NULL_U32};
+    use crate::{cache_aligned::CacheAlignedU32, RawAllocator, NULL_U32};
     use std::sync::atomic::Ordering;
 
     /// Push `slab_index` onto a worker's list given the head.
     pub unsafe fn push_slab_into_list(
-        allocator: &Allocator,
+        allocator: &RawAllocator,
         head: &CacheAlignedU32,
         slab_index: u32,
     ) {
@@ -539,7 +415,7 @@ mod worker_local_list {
 
     /// Remove a slab from a specific list, given the head.
     pub unsafe fn remove_slab_from_list(
-        allocator: &Allocator,
+        allocator: &RawAllocator,
         head: &CacheAlignedU32,
         slab_index: u32,
     ) {
@@ -560,7 +436,7 @@ mod worker_local_list {
 
     /// Iterate over the slabs in a worker's list.
     pub unsafe fn iterate(
-        allocator: &Allocator,
+        allocator: &RawAllocator,
         mut current_head: u32,
     ) -> impl Iterator<Item = u32> + '_ {
         std::iter::from_fn(move || {
@@ -575,7 +451,7 @@ mod worker_local_list {
     }
 
     /// Unlink slab from the worker-local free list (double linked list).
-    unsafe fn unlink_slab_from_list(allocator: &Allocator, slab_index: u32) {
+    unsafe fn unlink_slab_from_list(allocator: &RawAllocator, slab_index: u32) {
         let slab_meta = unsafe { allocator.slab_meta(slab_index).as_mut() };
         let prev_slab_index = slab_meta.prev;
         let next_slab_index = slab_meta.next;

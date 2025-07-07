@@ -10,8 +10,8 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 use rts_alloc::{
+    raw_allocator::RawAllocator,
     size_classes::{NUM_SIZE_CLASSES, SIZE_CLASSES},
-    Allocator,
 };
 use std::{
     io,
@@ -89,7 +89,7 @@ enum Section {
 }
 
 pub struct App {
-    allocator: Allocator,
+    allocator: RawAllocator,
     worker_offset: AtomicUsize,
     slab_offset: AtomicUsize,
     selected_section: Section,
