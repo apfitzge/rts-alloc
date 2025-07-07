@@ -8,6 +8,7 @@ use std::{
 use crate::{
     align::round_to_next_alignment_of,
     cache_aligned::{CacheAligned, CacheAlignedU32},
+    error::Error,
     free_stack::FreeStack,
     remote_free_stack::RemoteFreeStack,
     size_classes::{size_class_index, MAX_SIZE, MIN_SIZE, NUM_SIZE_CLASSES, SIZE_CLASSES},
@@ -15,6 +16,7 @@ use crate::{
 
 mod align;
 pub mod cache_aligned;
+pub mod error;
 pub mod free_stack;
 pub mod remote_free_stack;
 pub mod size_classes;
@@ -339,12 +341,10 @@ pub fn create_allocator(
     num_workers: u32,
     slab_size: u32,
     size: usize,
-) -> Result<Allocator, ()> {
-    // TODO: make error instead of panic.
-    assert!(
-        slab_size.is_power_of_two(),
-        "Slab size must be a power of two"
-    );
+) -> Result<Allocator, Error> {
+    if !slab_size.is_power_of_two() {
+        return Err(Error::InvalidSlabSize);
+    }
 
     let file_path = file_path.as_ref();
     let file = std::fs::OpenOptions::new()
@@ -352,8 +352,8 @@ pub fn create_allocator(
         .write(true)
         .create_new(true)
         .open(file_path)
-        .map_err(|_| ())?;
-    file.set_len(size as u64).map_err(|_| ())?;
+        .map_err(Error::IoError)?;
+    file.set_len(size as u64).map_err(Error::IoError)?;
 
     let mmap = unsafe {
         libc::mmap(
@@ -367,11 +367,11 @@ pub fn create_allocator(
     };
 
     if mmap == libc::MAP_FAILED {
-        return Err(());
+        return Err(Error::MMapError(mmap as usize));
     }
 
     let header_ptr = mmap as *mut Header;
-    let mut header = NonNull::new(header_ptr).ok_or(())?;
+    let mut header = NonNull::new(header_ptr).expect("mmap cannot be null after map_failed check");
 
     const WORKER_STATES_OFFSET: usize = core::mem::offset_of!(Header, worker_states);
     let worker_states_size = (num_workers as usize) * core::mem::size_of::<WorkerState>();
@@ -425,15 +425,15 @@ pub fn create_allocator(
     Ok(Allocator { header })
 }
 
-pub fn join_allocator(file_path: impl AsRef<Path>) -> Result<Allocator, ()> {
+pub fn join_allocator(file_path: impl AsRef<Path>) -> Result<Allocator, Error> {
     let file_path = file_path.as_ref();
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(file_path)
-        .map_err(|_| ())?;
+        .map_err(Error::IoError)?;
 
-    let size = file.metadata().map_err(|_| ())?.len() as usize;
+    let size = file.metadata().map_err(Error::IoError)?.len() as usize;
 
     let mmap = unsafe {
         libc::mmap(
@@ -447,11 +447,11 @@ pub fn join_allocator(file_path: impl AsRef<Path>) -> Result<Allocator, ()> {
     };
 
     if mmap == libc::MAP_FAILED {
-        return Err(());
+        return Err(Error::MMapError(mmap as usize));
     }
 
     let header_ptr = mmap as *mut Header;
-    let header = NonNull::new(header_ptr).ok_or(())?;
+    let header = NonNull::new(header_ptr).expect("mmap cannot be null after map_failed check");
     Ok(Allocator { header })
 }
 
