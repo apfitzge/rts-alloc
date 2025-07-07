@@ -10,7 +10,7 @@ use crate::{
     cache_aligned::{CacheAligned, CacheAlignedU32},
     error::Error,
     free_stack::FreeStack,
-    index::NULL,
+    index::NULL_U32,
     remote_free_stack::RemoteFreeStack,
     size_classes::{size_class_index, MAX_SIZE, MIN_SIZE, NUM_SIZE_CLASSES, SIZE_CLASSES},
 };
@@ -47,7 +47,7 @@ impl WorkerAssignedAllocator {
         let worker = unsafe { self.allocator.worker_state(self.worker_index).as_ref() };
         let partial_head = &worker.partial_slabs_heads[size_class_index as usize];
         let mut slab_index = partial_head.load(Ordering::Acquire);
-        if slab_index == NULL {
+        if slab_index == NULL_U32 {
             // No partial slab available, try to take a free slab.
             if !self
                 .allocator
@@ -59,7 +59,7 @@ impl WorkerAssignedAllocator {
         }
 
         // At this point, we have a partial slab available.
-        debug_assert_ne!(slab_index, NULL, "partial slab head should not be NULL");
+        debug_assert_ne!(slab_index, NULL_U32, "partial slab head should not be NULL");
 
         // Pop an item from the free stack of the slab.
         let slab_meta = unsafe { self.allocator.slab_meta(slab_index).as_mut() };
@@ -265,7 +265,7 @@ impl Allocator {
         for size_index in 0..NUM_SIZE_CLASSES {
             let partial_head = &worker_state.partial_slabs_heads[size_index];
             let mut current_head = partial_head.load(Ordering::Acquire);
-            while current_head != NULL {
+            while current_head != NULL_U32 {
                 unsafe {
                     worker_local_list::remove_slab_from_list(self, partial_head, current_head);
                     global_free_stack::return_the_slab(self, current_head);
@@ -275,7 +275,7 @@ impl Allocator {
 
             let full_head = &worker_state.full_slabs_heads[size_index];
             let mut current_head = full_head.load(Ordering::Acquire);
-            while current_head != NULL {
+            while current_head != NULL_U32 {
                 unsafe {
                     worker_local_list::remove_slab_from_list(self, full_head, current_head);
                     global_free_stack::return_the_slab(self, current_head);
@@ -403,7 +403,7 @@ pub fn create_allocator(
         header.as_mut().slab_meta_offset = slab_meta_offset as u32;
         header.as_mut().slab_size = slab_size;
         header.as_mut().slab_offset = slab_offset;
-        header.as_mut().global_free_stack = CacheAligned(AtomicU32::new(NULL));
+        header.as_mut().global_free_stack = CacheAligned(AtomicU32::new(NULL_U32));
     }
 
     let allocator = Allocator { header };
@@ -418,8 +418,9 @@ pub fn create_allocator(
         for size_index in 0..NUM_SIZE_CLASSES {
             unsafe {
                 worker_state.as_mut().partial_slabs_heads[size_index]
-                    .store(NULL, Ordering::Relaxed);
-                worker_state.as_mut().full_slabs_heads[size_index].store(NULL, Ordering::Relaxed);
+                    .store(NULL_U32, Ordering::Relaxed);
+                worker_state.as_mut().full_slabs_heads[size_index]
+                    .store(NULL_U32, Ordering::Relaxed);
             }
         }
     }
@@ -516,7 +517,7 @@ impl SlabMeta {
 // Includes all functions related to modifying the global free stack.
 // These are internal functions that should be used by the allocator only.
 mod global_free_stack {
-    use crate::{Allocator, NULL};
+    use crate::{Allocator, NULL_U32};
     use std::sync::atomic::Ordering;
 
     /// Push a slab index onto the global free stack.
@@ -524,8 +525,8 @@ mod global_free_stack {
         loop {
             let current_head = allocator.header().global_free_stack.load(Ordering::Acquire);
             let slab_meta = unsafe { allocator.slab_meta(index).as_mut() };
-            slab_meta.assigned_worker = NULL; // mark the slab as unassigned.
-            slab_meta.prev = NULL; // not used in global free stack - clear for safety.
+            slab_meta.assigned_worker = NULL_U32; // mark the slab as unassigned.
+            slab_meta.prev = NULL_U32; // not used in global free stack - clear for safety.
             slab_meta.next = current_head; // link the slab to the global free stack.
             if allocator
                 .header()
@@ -544,7 +545,7 @@ mod global_free_stack {
         let header = allocator.header();
         loop {
             let current_head = header.global_free_stack.load(Ordering::Acquire);
-            if current_head == NULL {
+            if current_head == NULL_U32 {
                 return None;
             }
 
@@ -564,7 +565,7 @@ mod global_free_stack {
 // These are internal functions that should be used by the allocator only,
 // and more specifically should only be called by the assigned worker.
 mod worker_local_list {
-    use crate::{cache_aligned::CacheAlignedU32, Allocator, NULL};
+    use crate::{cache_aligned::CacheAlignedU32, Allocator, NULL_U32};
     use std::sync::atomic::Ordering;
 
     /// Push `slab_index` onto a worker's list given the head.
@@ -576,10 +577,10 @@ mod worker_local_list {
         let current_head = head.load(Ordering::Relaxed);
         let slab_meta = unsafe { allocator.slab_meta(slab_index).as_mut() };
 
-        slab_meta.prev = NULL; // no previous slab in the list.
+        slab_meta.prev = NULL_U32; // no previous slab in the list.
         slab_meta.next = current_head; // link the slab to the list.
 
-        if current_head != NULL {
+        if current_head != NULL_U32 {
             // If the current head is not NULL, we need to link it to the new slab.
             let current_head_meta = unsafe { allocator.slab_meta(current_head).as_mut() };
             current_head_meta.prev = slab_index; // link the current head to the new slab.
@@ -596,7 +597,7 @@ mod worker_local_list {
     ) {
         let current_head = head.load(Ordering::Relaxed);
         debug_assert_ne!(
-            current_head, NULL,
+            current_head, NULL_U32,
             "List head should not be NULL, since we're removing a slab"
         );
 
@@ -615,7 +616,7 @@ mod worker_local_list {
         mut current_head: u32,
     ) -> impl Iterator<Item = u32> + '_ {
         std::iter::from_fn(move || {
-            if current_head == NULL {
+            if current_head == NULL_U32 {
                 return None;
             }
             let slab_meta = unsafe { allocator.slab_meta(current_head).as_ref() };
@@ -632,13 +633,13 @@ mod worker_local_list {
         let next_slab_index = slab_meta.next;
 
         // If the prev_slab_index is set, we need to link prev to next.
-        if prev_slab_index != NULL {
+        if prev_slab_index != NULL_U32 {
             let prev_slab_meta = unsafe { allocator.slab_meta(prev_slab_index).as_mut() };
             prev_slab_meta.next = next_slab_index; // link previous slab to next slab.
         }
 
         // If the next_slab_index is set, we need to link next to prev.
-        if next_slab_index != NULL {
+        if next_slab_index != NULL_U32 {
             let next_slab_meta = unsafe { allocator.slab_meta(next_slab_index).as_mut() };
             next_slab_meta.prev = prev_slab_index; // link next slab to previous slab
         }

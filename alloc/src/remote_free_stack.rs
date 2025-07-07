@@ -1,4 +1,4 @@
-use crate::{cache_aligned::CacheAlignedU32, NULL};
+use crate::{cache_aligned::CacheAlignedU32, NULL_U32};
 use std::sync::atomic::Ordering;
 
 /// The remote free stack is a lock-free stack that allows pushing and popping
@@ -13,7 +13,7 @@ pub struct RemoteFreeStack {
 impl RemoteFreeStack {
     /// Sets up the remote free stack with no items in the stack.
     pub fn reset(&mut self) {
-        self.head.store(NULL, Ordering::Release);
+        self.head.store(NULL_U32, Ordering::Release);
     }
 
     /// Swaps the head of the stack with NULL, effectively clearing the stack.
@@ -28,7 +28,7 @@ impl RemoteFreeStack {
         slab_item_size: u32,
         slab_ptr: *const u8,
     ) -> impl Iterator<Item = u32> + '_ {
-        let current = self.head.swap(NULL, Ordering::AcqRel);
+        let current = self.head.swap(NULL_U32, Ordering::AcqRel);
         RemoteFreeStackIter {
             current,
             slab_item_size,
@@ -81,7 +81,7 @@ impl Iterator for RemoteFreeStackIter {
     type Item = u32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current == NULL {
+        if self.current == NULL_U32 {
             return None;
         }
 
@@ -115,7 +115,7 @@ mod tests {
         let stack_ptr = stack.as_mut_ptr().cast::<u8>();
 
         let remote_free_stack = RemoteFreeStack {
-            head: CacheAligned(NULL.into()),
+            head: CacheAligned(NULL_U32.into()),
         };
 
         // Push until full
@@ -141,7 +141,7 @@ mod tests {
         let stack_ptr = stack.as_mut_ptr().cast::<u8>();
 
         let remote_free_stack = RemoteFreeStack {
-            head: CacheAligned(NULL.into()),
+            head: CacheAligned(NULL_U32.into()),
         };
 
         // Push first half of the stack.
