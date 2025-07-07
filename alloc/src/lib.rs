@@ -93,6 +93,10 @@ impl WorkerAssignedAllocator {
         Some(ptr)
     }
 
+    /// Free an allocated pointer.
+    ///
+    /// # Safety
+    /// - `ptr` must be a valid pointer that was allocated by this allocator.
     pub unsafe fn free(&self, ptr: NonNull<u8>) {
         let offset = self.allocator.ptr_to_offset(ptr);
 
@@ -213,10 +217,19 @@ impl Allocator {
         unsafe { self.header.as_ref() }
     }
 
+    /// Convert a pointer to an offset from the start of the header.
+    ///
+    /// # Safety
+    /// - `ptr` must be greater than or equal to the `header` pointer.
     pub unsafe fn ptr_to_offset(&self, ptr: NonNull<u8>) -> usize {
         ptr.byte_offset_from_unsigned(self.header)
     }
 
+    /// Convert an offset to a pointer from the start of the header.
+    ///
+    /// # Safety
+    /// - `offset` should be less than the size of the allocator to avoid
+    ///   out-of-bounds access.
     pub unsafe fn offset_to_ptr(&self, offset: usize) -> NonNull<u8> {
         self.header.byte_add(offset).cast()
     }
@@ -269,6 +282,10 @@ impl Allocator {
     }
 
     /// Should only be called by the worker that owns the slab.
+    ///
+    /// # Safety
+    /// - The `slab_index` must be less than the number of slabs in the allocator.
+    /// - The `slab_index` must be owned by the worker calling this function.
     pub unsafe fn drain_remote_frees(&self, slab_index: u32) -> impl Iterator<Item = u32> + '_ {
         let slab_meta = unsafe { self.slab_meta(slab_index).as_mut() };
         let slab_item_size = SIZE_CLASSES[usize::from(slab_meta.size_class_index)];
@@ -277,29 +294,42 @@ impl Allocator {
     }
 
     /// Given a slab index, return a pointer to the slab metadata.
-    pub unsafe fn slab_meta(&self, index: u32) -> NonNull<SlabMeta> {
+    ///
+    /// # Safety
+    /// - The `slab_index` must be less than the number of slabs in the allocator.
+    pub unsafe fn slab_meta(&self, slab_index: u32) -> NonNull<SlabMeta> {
         let header = self.header();
         self.header
             .cast::<u8>()
             .byte_add(header.slab_meta_offset as usize)
-            .byte_add(index as usize * header.slab_meta_size as usize)
+            .byte_add(slab_index as usize * header.slab_meta_size as usize)
             .cast()
     }
 
     /// Given a slab index, return a pointer to the slab memory.
-    pub unsafe fn slab(&self, index: u32) -> NonNull<u8> {
+    ///
+    /// # Safety
+    /// - The `slab_index` must be less than the number of slabs in the allocator.
+    pub unsafe fn slab(&self, slab_index: u32) -> NonNull<u8> {
         let header = self.header();
         self.header
             .cast::<u8>()
             .byte_add(header.slab_offset as usize)
-            .byte_add((index * header.slab_size) as usize)
+            .byte_add((slab_index * header.slab_size) as usize)
     }
 
     /// Given a worker index, return a pointer to the worker state.
-    pub unsafe fn worker_state(&self, index: u32) -> NonNull<WorkerState> {
+    ///
+    /// # Safety
+    /// - The `worker_index` must be less than the number of workers in the allocator.
+    pub unsafe fn worker_state(&self, worker_index: u32) -> NonNull<WorkerState> {
         let header = self.header();
         let worker_states_ptr = header.worker_states.as_ptr();
-        let worker_state_ptr = unsafe { worker_states_ptr.add(index as usize) };
+
+        // SAFETY: The `worker_index` must be less than `num_workers`.
+        let worker_state_ptr = unsafe { worker_states_ptr.add(worker_index as usize) };
+
+        // SAFETY: The `worker_state_ptr` is not null.
         NonNull::new(worker_state_ptr.cast_mut()).expect("Worker state pointer should not be null")
     }
 }

@@ -18,6 +18,11 @@ impl RemoteFreeStack {
 
     /// Swaps the head of the stack with NULL, effectively clearing the stack.
     /// Returns an iterator over the indices that were in the stack.
+    ///
+    /// # Safety
+    /// - The `slab_item_size` must be a valid size for the items in the slab -
+    ///   i.e. one of the `SIZE_CLASSES`.
+    /// - The `slab_ptr` must point to a valid slab memory region.
     pub unsafe fn drain(
         &self,
         slab_item_size: u32,
@@ -31,14 +36,24 @@ impl RemoteFreeStack {
         }
     }
 
-    /// Pushes an item onto the remote free stack.
-    pub unsafe fn push(&self, item: u32, slab_item_size: u32, slab_ptr: *mut u8) {
+    /// Pushes an item index onto the remote free stack.
+    ///
+    /// # Safety
+    /// - The `item_index` must be a valid index within the slab allocation:
+    ///   - i.e. `0 <= item < slab_size / slab_item_size`.
+    /// - The `slab_item_size` must be a valid size for the items in
+    ///   the slab - i.e. one of the `SIZE_CLASSES`.
+    /// - The `slab_ptr` must point to a valid slab memory region.
+    pub unsafe fn push(&self, item_index: u32, slab_item_size: u32, slab_ptr: *mut u8) {
+        // SAFETY: The `item_index` is a valid index within the slab allocation.
         let pushed_slot = slab_ptr
-            .byte_add(item as usize * slab_item_size as usize)
+            .byte_add(item_index as usize * slab_item_size as usize)
             .cast::<u32>();
         loop {
             // Write the current head to the slab at the item index.
             let current = self.head.load(Ordering::Acquire);
+
+            // SAFETY: The `pushed_slot` is a valid pointer to a u32.
             unsafe {
                 pushed_slot.write(current);
             }
@@ -46,7 +61,7 @@ impl RemoteFreeStack {
             // Attempt to set the head to the item index using CAS.
             if self
                 .head
-                .compare_exchange_weak(current, item, Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange_weak(current, item_index, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
                 // Successfully pushed the item onto the stack.
