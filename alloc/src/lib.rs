@@ -7,21 +7,25 @@ use std::{
 
 use crate::{
     align::round_to_next_alignment_of,
-    cache_aligned::{CacheAligned, CacheAlignedU32},
+    cache_aligned::CacheAligned,
     error::Error,
     free_stack::FreeStack,
+    header::{Header, MAGIC, VERSION},
     index::NULL_U32,
     remote_free_stack::RemoteFreeStack,
     size_classes::{size_class_index, MAX_SIZE, MIN_SIZE, NUM_SIZE_CLASSES, SIZE_CLASSES},
+    worker_state::WorkerState,
 };
 
 mod align;
 pub mod cache_aligned;
 pub mod error;
 pub mod free_stack;
+pub mod header;
 pub mod index;
 pub mod remote_free_stack;
 pub mod size_classes;
+pub mod worker_state;
 
 pub struct WorkerAssignedAllocator {
     pub allocator: Allocator,
@@ -456,35 +460,6 @@ pub fn join_allocator(file_path: impl AsRef<Path>) -> Result<Allocator, Error> {
     let header_ptr = mmap as *mut Header;
     let header = NonNull::new(header_ptr).expect("mmap cannot be null after map_failed check");
     Ok(Allocator { header })
-}
-
-pub const MAGIC: u64 = 0x727473616c6f63; // "rtsaloc"
-pub const VERSION: u32 = 1;
-
-#[repr(C)]
-pub struct Header {
-    pub magic: u64,
-    pub version: u32,
-    pub num_workers: u32,
-    pub num_slabs: u32,
-    pub slab_meta_offset: u32,
-    pub slab_meta_size: u32,
-    pub slab_size: u32,
-    pub slab_offset: u32,
-    pub global_free_stack: CacheAlignedU32,
-
-    /// Trailing array of worker states.
-    /// Length is `num_workers`.
-    pub worker_states: [WorkerState; 0],
-    // trailing array of `SlabMeta` with size of `num_slabs`.
-    // each is sufficiently sized such that we can hold a
-    // `FreeStack` with size of 64 bytes + (slab_size / 256) u16s.
-}
-
-#[repr(C)]
-pub struct WorkerState {
-    pub partial_slabs_heads: [CacheAlignedU32; NUM_SIZE_CLASSES],
-    pub full_slabs_heads: [CacheAlignedU32; NUM_SIZE_CLASSES],
 }
 
 #[repr(C)]
