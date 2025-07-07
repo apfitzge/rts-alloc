@@ -60,9 +60,9 @@ impl WorkerAssignedAllocator {
         // Pop an item from the free stack of the slab.
         let slab_meta = unsafe { self.allocator.slab_meta(slab_index).as_mut() };
         let free_stack = &mut slab_meta.free_stack;
-        let allocation_index_in_slab = free_stack
-            .pop()
-            .expect("partial slab should have free items");
+        // SAFETY: The slab-meta is initialized with enough space for the free stack.
+        let allocation_index_in_slab =
+            unsafe { free_stack.pop() }.expect("partial slab should have free items");
 
         // If the free stack is now empty, move the slab to the full list.
         if free_stack.is_empty() {
@@ -109,7 +109,7 @@ impl WorkerAssignedAllocator {
         let allocation_index_in_slab = (offset_from_slab_start / slab_size_class as usize) as u16;
 
         // Check if the slab is assigned to this worker.
-        if slab_meta.assigned_worker != self.worker_index as u32 {
+        if slab_meta.assigned_worker != self.worker_index {
             slab_meta.remote_free_stack.push(
                 u32::from(allocation_index_in_slab),
                 slab_size_class,
@@ -160,9 +160,9 @@ impl WorkerAssignedAllocator {
 
         debug_assert!(
             allocation_index_in_slab
-                < SlabMeta::capacity(slab_size as u32, slab_meta.size_class_index),
+                < SlabMeta::capacity(slab_size, slab_meta.size_class_index),
             "allocation index is out of bounds for slab {slab_index}. Index={allocation_index_in_slab}, Capacity={}",
-            SlabMeta::capacity(slab_size as u32, slab_meta.size_class_index)
+            SlabMeta::capacity(slab_size, slab_meta.size_class_index)
         );
         let free_stack = &mut slab_meta.free_stack;
         free_stack.push(allocation_index_in_slab);
@@ -240,7 +240,7 @@ impl Allocator {
         let slab_meta = unsafe { self.slab_meta(slab_index).as_mut() };
         slab_meta.assign(self.header().slab_size, worker_index, size_class_index);
 
-        return true;
+        true
     }
 
     pub fn clear_worker(&self, worker_index: u32) {
@@ -363,15 +363,15 @@ pub fn create_allocator(
     let num_slabs = (size as u32 - slab_offset) / slab_size;
 
     unsafe {
-        (*header.as_mut()).magic = MAGIC;
-        (*header.as_mut()).version = VERSION;
-        (*header.as_mut()).num_workers = num_workers;
-        (*header.as_mut()).num_slabs = num_slabs;
-        (*header.as_mut()).slab_meta_size = slab_meta_size as u32;
-        (*header.as_mut()).slab_meta_offset = slab_meta_offset as u32;
-        (*header.as_mut()).slab_size = slab_size;
-        (*header.as_mut()).slab_offset = slab_offset;
-        (*header.as_mut()).global_free_stack = CacheAligned(AtomicU32::new(NULL));
+        header.as_mut().magic = MAGIC;
+        header.as_mut().version = VERSION;
+        header.as_mut().num_workers = num_workers;
+        header.as_mut().num_slabs = num_slabs;
+        header.as_mut().slab_meta_size = slab_meta_size as u32;
+        header.as_mut().slab_meta_offset = slab_meta_offset as u32;
+        header.as_mut().slab_size = slab_size;
+        header.as_mut().slab_offset = slab_offset;
+        header.as_mut().global_free_stack = CacheAligned(AtomicU32::new(NULL));
     }
 
     let allocator = Allocator { header };

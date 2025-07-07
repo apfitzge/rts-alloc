@@ -261,14 +261,14 @@ impl App {
             let worker_offset = self.worker_offset.load(Ordering::Relaxed);
             if worker_offset + workers_per_row > num_workers {
                 self.worker_offset.store(
-                    num_workers.saturating_sub(workers_per_row) as usize,
+                    num_workers.saturating_sub(workers_per_row),
                     Ordering::Relaxed,
                 );
             }
             let worker_offset = self.worker_offset.load(Ordering::Relaxed);
-            (worker_offset, worker_offset + workers_per_row as usize)
+            (worker_offset, worker_offset + workers_per_row)
         } else {
-            (0, num_workers as usize)
+            (0, num_workers)
         };
 
         for (index, worker_index) in (starting_index..ending_index).enumerate() {

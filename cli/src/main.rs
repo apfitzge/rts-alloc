@@ -72,12 +72,10 @@ fn main() {
                     return;
                 }
             }
-            match rts_alloc::create_allocator(args.path, num_workers, slab_size, file_size) {
-                Ok(allocator) => allocator,
-                Err(e) => {
-                    eprintln!("Failed to create allocator: {:?}", e);
-                    return;
-                }
+            if let Err(err) =
+                rts_alloc::create_allocator(args.path, num_workers, slab_size, file_size)
+            {
+                eprintln!("Failed to create allocator: {err:?}");
             };
         }
         SubCommand::Allocate { worker_id, size } => {
