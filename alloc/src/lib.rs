@@ -10,6 +10,7 @@ use crate::{
     cache_aligned::{CacheAligned, CacheAlignedU32},
     error::Error,
     free_stack::FreeStack,
+    index::NULL,
     remote_free_stack::RemoteFreeStack,
     size_classes::{size_class_index, MAX_SIZE, MIN_SIZE, NUM_SIZE_CLASSES, SIZE_CLASSES},
 };
@@ -18,6 +19,7 @@ mod align;
 pub mod cache_aligned;
 pub mod error;
 pub mod free_stack;
+pub mod index;
 pub mod remote_free_stack;
 pub mod size_classes;
 
@@ -510,8 +512,6 @@ impl SlabMeta {
         (slab_size / size_class) as u16
     }
 }
-
-const NULL: u32 = u32::MAX;
 
 // Includes all functions related to modifying the global free stack.
 // These are internal functions that should be used by the allocator only.
