@@ -64,10 +64,10 @@ fn main() {
             if delete_existing && path.exists() {
                 std::fs::remove_file(&path).expect("Failed to delete existing allocator file");
             }
-            rts_alloc::create_allocator(&path, num_workers, slab_size, file_size)
+            rts_alloc::init::create_allocator(&path, num_workers, slab_size, file_size)
                 .expect("Failed to create allocator")
         }
-        None => rts_alloc::join_allocator(&path).expect("Failed to join allocator"),
+        None => rts_alloc::init::join_allocator(&path).expect("Failed to join allocator"),
     };
 
     // Setup TUI

@@ -1,7 +1,6 @@
-use std::{path::PathBuf, time::Instant};
-
 use clap::{Parser, Subcommand};
 use rts_alloc::{size_classes::SIZE_CLASSES, WorkerAssignedAllocator};
+use std::{path::PathBuf, time::Instant};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -73,13 +72,13 @@ fn main() {
                 }
             }
             if let Err(err) =
-                rts_alloc::create_allocator(args.path, num_workers, slab_size, file_size)
+                rts_alloc::init::create_allocator(args.path, num_workers, slab_size, file_size)
             {
                 eprintln!("Failed to create allocator: {err:?}");
             };
         }
         SubCommand::Allocate { worker_id, size } => {
-            let allocator = match rts_alloc::join_allocator(args.path) {
+            let allocator = match rts_alloc::init::join_allocator(args.path) {
                 Ok(allocator) => allocator,
                 Err(e) => {
                     eprintln!("Failed to join allocator: {e:?}");
@@ -106,7 +105,7 @@ fn main() {
         }
         SubCommand::Free { worker_id, offset } => {
             // Join the allocator.
-            let allocator = match rts_alloc::join_allocator(args.path) {
+            let allocator = match rts_alloc::init::join_allocator(args.path) {
                 Ok(allocator) => allocator,
                 Err(e) => {
                     eprintln!("Failed to join allocator: {e:?}");
@@ -124,13 +123,11 @@ fn main() {
             unsafe {
                 allocator.free(ptr);
             }
-            println!(
-                "Worker {worker_id} freed memory at offset {offset} (0x{offset:x})"
-            );
+            println!("Worker {worker_id} freed memory at offset {offset} (0x{offset:x})");
         }
         SubCommand::ClearWorker { worker_id } => {
             // Join the allocator.
-            let allocator = match rts_alloc::join_allocator(args.path) {
+            let allocator = match rts_alloc::init::join_allocator(args.path) {
                 Ok(allocator) => allocator,
                 Err(e) => {
                     eprintln!("Failed to join allocator: {e:?}");
@@ -145,7 +142,7 @@ fn main() {
             hold_slabs,
         } => {
             // Join the allocator.
-            let allocator = match rts_alloc::join_allocator(args.path) {
+            let allocator = match rts_alloc::init::join_allocator(args.path) {
                 Ok(allocator) => allocator,
                 Err(e) => {
                     eprintln!("Failed to join allocator: {e:?}");
@@ -204,7 +201,7 @@ fn main() {
             hold_slabs,
         } => {
             // Join the allocator.
-            let allocator = match rts_alloc::join_allocator(args.path) {
+            let allocator = match rts_alloc::init::join_allocator(args.path) {
                 Ok(allocator) => allocator,
                 Err(e) => {
                     eprintln!("Failed to join allocator: {e:?}");
