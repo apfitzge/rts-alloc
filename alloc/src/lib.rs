@@ -57,10 +57,12 @@ impl WorkerAssignedAllocator {
         let mut slab_index = partial_head.load(Ordering::Acquire);
         if slab_index == NULL_U32 {
             // No partial slab available, try to take a free slab.
-            if !self
-                .allocator
-                .take_free_slab(self.worker_index, size_class_index)
-            {
+            // SAFETY:
+            // - The `worker_index` is valid.
+            if !unsafe {
+                self.allocator
+                    .take_free_slab(self.worker_index, size_class_index)
+            } {
                 return None; // No free slab available.
             }
             slab_index = partial_head.load(Ordering::Acquire);

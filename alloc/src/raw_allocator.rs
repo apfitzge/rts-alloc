@@ -12,6 +12,9 @@ pub struct RawAllocator {
 
 impl RawAllocator {
     pub fn header(&self) -> &Header {
+        // SAFETY:
+        // - The header pointer is guaranteed to be non-null.
+        // - The header is properly initialized and aligned.
         unsafe { self.header.as_ref() }
     }
 
@@ -33,13 +36,17 @@ impl RawAllocator {
     }
 
     /// Take a free slab for the worker, for a specific size class.
-    pub fn take_free_slab(&self, worker_index: u32, size_class_index: u8) -> bool {
+    ///
+    /// # Safety
+    /// - The `worker_index` must be less than the number of workers in the allocator.
+    pub unsafe fn take_free_slab(&self, worker_index: u32, size_class_index: u8) -> bool {
         let Some(slab_index) = global_free_stack::try_pop_free_slab(self) else {
             return false;
         };
 
         // No other worker should be touching this workers partial/full lists.
         // No need to do a CAS, since there should not be contention.
+        // SAFETY: `worker_index` is valid.
         let worker = unsafe { self.worker_state(worker_index).as_ref() };
         let partial_head = &worker.partial_slabs_heads[usize::from(size_class_index)];
         unsafe {
@@ -48,8 +55,11 @@ impl RawAllocator {
 
         // The slab is now part of the worker's partial list.
         // Now set up the slab's metadata to reflect this.
+        // SAFETY: `slab_index` is valid.
         let slab_meta = unsafe { self.slab_meta(slab_index).as_mut() };
-        slab_meta.assign(self.header().slab_size, worker_index, size_class_index);
+
+        // SAFETY: The slab meta must be allocated with enough trailing data for `free_stack`.
+        unsafe { slab_meta.assign(self.header().slab_size, worker_index, size_class_index) };
 
         true
     }
