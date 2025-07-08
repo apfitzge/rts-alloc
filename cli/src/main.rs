@@ -68,7 +68,7 @@ fn main() {
         } => {
             if delete_existing && args.path.exists() {
                 if let Err(e) = std::fs::remove_file(&args.path) {
-                    eprintln!("Failed to delete existing allocator file: {:?}", e);
+                    eprintln!("Failed to delete existing allocator file: {e:?}");
                     return;
                 }
             }
@@ -82,7 +82,7 @@ fn main() {
             let allocator = match rts_alloc::join_allocator(args.path) {
                 Ok(allocator) => allocator,
                 Err(e) => {
-                    eprintln!("Failed to join allocator: {:?}", e);
+                    eprintln!("Failed to join allocator: {e:?}");
                     return;
                 }
             };
@@ -100,7 +100,7 @@ fn main() {
                     );
                 }
                 None => {
-                    eprintln!("Failed to allocate {} bytes for worker {}", size, worker_id);
+                    eprintln!("Failed to allocate {size} bytes for worker {worker_id}");
                 }
             }
         }
@@ -109,7 +109,7 @@ fn main() {
             let allocator = match rts_alloc::join_allocator(args.path) {
                 Ok(allocator) => allocator,
                 Err(e) => {
-                    eprintln!("Failed to join allocator: {:?}", e);
+                    eprintln!("Failed to join allocator: {e:?}");
                     return;
                 }
             };
@@ -125,8 +125,7 @@ fn main() {
                 allocator.free(ptr);
             }
             println!(
-                "Worker {} freed memory at offset {} (0x{:x})",
-                worker_id, offset, offset
+                "Worker {worker_id} freed memory at offset {offset} (0x{offset:x})"
             );
         }
         SubCommand::ClearWorker { worker_id } => {
@@ -134,12 +133,12 @@ fn main() {
             let allocator = match rts_alloc::join_allocator(args.path) {
                 Ok(allocator) => allocator,
                 Err(e) => {
-                    eprintln!("Failed to join allocator: {:?}", e);
+                    eprintln!("Failed to join allocator: {e:?}");
                     return;
                 }
             };
             allocator.clear_worker(worker_id);
-            println!("Worker {} cleared its allocations", worker_id);
+            println!("Worker {worker_id} cleared its allocations");
         }
         SubCommand::Simulate {
             worker_id,
@@ -149,7 +148,7 @@ fn main() {
             let allocator = match rts_alloc::join_allocator(args.path) {
                 Ok(allocator) => allocator,
                 Err(e) => {
-                    eprintln!("Failed to join allocator: {:?}", e);
+                    eprintln!("Failed to join allocator: {e:?}");
                     return;
                 }
             };
@@ -208,7 +207,7 @@ fn main() {
             let allocator = match rts_alloc::join_allocator(args.path) {
                 Ok(allocator) => allocator,
                 Err(e) => {
-                    eprintln!("Failed to join allocator: {:?}", e);
+                    eprintln!("Failed to join allocator: {e:?}");
                     return;
                 }
             };

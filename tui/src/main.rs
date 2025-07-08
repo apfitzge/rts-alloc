@@ -287,7 +287,7 @@ impl App {
 
     fn render_worker(&self, worker_index: usize, area: Rect, buf: &mut Buffer) {
         let worker_block = Block::bordered()
-            .title(format!("Worker {}", worker_index))
+            .title(format!("Worker {worker_index}"))
             .border_set(border::PLAIN);
         let worker_state = unsafe { self.allocator.worker_state(worker_index as u32).as_ref() };
 
@@ -383,7 +383,7 @@ impl App {
         };
 
         let outer_block = Block::bordered()
-            .title(format!("Slab Meta {}", slab_index))
+            .title(format!("Slab Meta {slab_index}"))
             .border_set(border::PLAIN);
 
         // Render outer block
@@ -483,7 +483,7 @@ impl App {
 
     fn render_slab(&self, slab_index: usize, area: Rect, buf: &mut Buffer) {
         let slab_block = Block::bordered()
-            .title(format!("Slab {}", slab_index))
+            .title(format!("Slab {slab_index}"))
             .border_set(border::PLAIN);
         slab_block.render(area, buf);
     }
