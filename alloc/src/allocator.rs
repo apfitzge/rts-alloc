@@ -1,4 +1,5 @@
 use crate::{error::Error, raw_allocator::RawAllocator};
+use core::ptr::NonNull;
 
 pub struct Allocator {
     raw: RawAllocator,
@@ -17,5 +18,12 @@ impl Allocator {
             return Err(Error::InvalidWorkerIndex);
         }
         Ok(Allocator { raw, worker_index })
+    }
+
+    /// Allocates a block of memory of the given size.
+    /// If the size is larger than the maximum size class, returns `None`.
+    /// If the allocation fails, returns `None`.
+    pub fn allocate(&self, size: u32) -> Option<NonNull<u8>> {
+        None
     }
 }

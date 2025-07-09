@@ -17,9 +17,9 @@ impl SlabMeta {
     ///
     /// # Safety
     /// - Must have trailing data for `free_stack`.
-    pub unsafe fn assign(&mut self, slab_size: u32, worker: u32, size_class_index: u8) {
+    pub unsafe fn assign(&mut self, slab_size: u32, worker: u32, size_class_index: usize) {
         self.assigned_worker = worker;
-        self.size_class_index = size_class_index;
+        self.size_class_index = size_class_index as u8;
         self.remote_free_stack.reset();
         unsafe {
             self.free_stack
@@ -29,8 +29,8 @@ impl SlabMeta {
 
     /// Calculate the maximum number of items that can fit in a slab of the
     /// given size class.
-    pub fn capacity(slab_size: u32, size_class_index: u8) -> u16 {
-        let size_class = SIZE_CLASSES[size_class_index as usize];
+    pub fn capacity(slab_size: u32, size_class_index: usize) -> u16 {
+        let size_class = SIZE_CLASSES[size_class_index];
         (slab_size / size_class) as u16
     }
 }

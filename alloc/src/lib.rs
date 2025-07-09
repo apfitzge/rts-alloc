@@ -1,7 +1,7 @@
 use crate::{
     index::NULL_U32,
     raw_allocator::RawAllocator,
-    size_classes::{size_class_index, MAX_SIZE, NUM_SIZE_CLASSES, SIZE_CLASSES},
+    size_classes::{size_class_index, NUM_SIZE_CLASSES, SIZE_CLASSES},
     slab_meta::SlabMeta,
 };
 use std::{ptr::NonNull, sync::atomic::Ordering};
@@ -37,10 +37,7 @@ impl WorkerAssignedAllocator {
     }
 
     pub fn allocate(&self, size: u32) -> Option<NonNull<u8>> {
-        if size > MAX_SIZE {
-            return None;
-        }
-        let size_class_index = size_class_index(size);
+        let size_class_index = size_class_index(size)?;
 
         // Check if there is a partial slab available for this size class.
         let worker = unsafe { self.allocator.worker_state(self.worker_index).as_ref() };
@@ -169,9 +166,9 @@ impl WorkerAssignedAllocator {
 
         debug_assert!(
             allocation_index_in_slab
-                < SlabMeta::capacity(slab_size, slab_meta.size_class_index),
+                < SlabMeta::capacity(slab_size, usize::from(slab_meta.size_class_index)),
             "allocation index is out of bounds for slab {slab_index}. Index={allocation_index_in_slab}, Capacity={}",
-            SlabMeta::capacity(slab_size, slab_meta.size_class_index)
+            SlabMeta::capacity(slab_size, usize::from(slab_meta.size_class_index))
         );
         let free_stack = &mut slab_meta.free_stack;
         free_stack.push(allocation_index_in_slab);

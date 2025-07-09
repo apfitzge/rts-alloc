@@ -10,9 +10,52 @@ const _: () = assert!(
     "NUM_SIZE_CLASSES must be less than 256"
 );
 
-pub fn size_class_index(size: u32) -> u8 {
-    debug_assert!(size <= MAX_SIZE);
+pub fn size_class_index(size: u32) -> Option<usize> {
+    if size > MAX_SIZE {
+        return None;
+    }
+    // SAFETY: size <= MAX_SIZE.
+    Some(unsafe { size_class_index_unchecked(size) })
+}
+
+/// Returns the size class index for a given `size`.
+///
+/// # Safety
+/// - The `size` must be less than or equal to `MAX_SIZE`.
+#[inline]
+pub unsafe fn size_class_index_unchecked(size: u32) -> usize {
     size.next_power_of_two()
         .trailing_zeros()
-        .saturating_sub(BASE_SHIFT) as u8
+        .saturating_sub(BASE_SHIFT) as usize
+}
+
+/// Returns the size class for a given `index`.
+///
+/// # Safety
+/// - The `index` must be less than `NUM_SIZE_CLASSES`.
+#[inline]
+pub unsafe fn size_class(index: usize) -> u32 {
+    *SIZE_CLASSES.get_unchecked(index)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_size_class_index() {
+        for (i, &size) in SIZE_CLASSES.iter().enumerate() {
+            assert_eq!(size_class_index(size - 1), Some(i));
+            assert_eq!(size_class_index(size), Some(i));
+        }
+        assert!(size_class_index(MAX_SIZE + 1).is_none());
+    }
+
+    #[test]
+    fn test_size_class() {
+        for (i, &size) in SIZE_CLASSES.iter().enumerate() {
+            // SAFETY: `i` is always less than `NUM_SIZE_CLASSES`.
+            assert_eq!(unsafe { size_class(i) }, size);
+        }
+    }
 }

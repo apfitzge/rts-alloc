@@ -39,7 +39,7 @@ impl RawAllocator {
     ///
     /// # Safety
     /// - The `worker_index` must be less than the number of workers in the allocator.
-    pub unsafe fn take_free_slab(&self, worker_index: u32, size_class_index: u8) -> bool {
+    pub unsafe fn take_free_slab(&self, worker_index: u32, size_class_index: usize) -> bool {
         let Some(slab_index) = global_free_stack::try_pop_free_slab(self) else {
             return false;
         };
@@ -48,7 +48,7 @@ impl RawAllocator {
         // No need to do a CAS, since there should not be contention.
         // SAFETY: `worker_index` is valid.
         let worker = unsafe { self.worker_state(worker_index).as_ref() };
-        let partial_head = &worker.partial_slabs_heads[usize::from(size_class_index)];
+        let partial_head = &worker.partial_slabs_heads[size_class_index];
         unsafe {
             worker_local_list::push_slab_into_list(self, partial_head, slab_index);
         }
