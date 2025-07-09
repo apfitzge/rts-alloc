@@ -7,6 +7,7 @@ use crate::{
 use std::{ptr::NonNull, sync::atomic::Ordering};
 
 mod align;
+pub mod allocator;
 pub mod cache_aligned;
 pub mod error;
 pub mod free_stack;
