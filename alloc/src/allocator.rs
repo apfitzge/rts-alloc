@@ -1,4 +1,4 @@
-use crate::{error::Error, header::Header};
+use crate::{error::Error, header::Header, size_classes::size_class_index};
 use core::ptr::NonNull;
 
 pub struct Allocator {
@@ -26,6 +26,37 @@ impl Allocator {
     /// If the size is larger than the maximum size class, returns `None`.
     /// If the allocation fails, returns `None`.
     pub fn allocate(&self, size: u32) -> Option<NonNull<u8>> {
-        None
+        let size_index = size_class_index(size)?;
+
+        // SAFETY: `size_index` is guaranteed to be valid by `size_class_index`.
+        let slab_index = unsafe { self.find_allocatable_slab_index(size_index) }?;
+        // SAFETY:
+        // - `slab_index` is guaranteed to be valid by `find_allocatable_slab_index`.
+        // - `size_index` is guaranteed to be valid by `size_class_index`.
+        unsafe { self.allocate_within_slab(slab_index, size_index) }
+    }
+
+    /// Try to find a suitable slab for allocation.
+    /// If a partial slab assigned to the worker is not found, then try to find
+    /// a slab from the global free list.
+    ///
+    /// # Safety
+    /// - The `size_index` must be a valid index for the size classes.
+    unsafe fn find_allocatable_slab_index(&self, _size_index: usize) -> Option<u32> {
+        todo!()
+    }
+
+    /// Attempt to allocate meomry within a slab.
+    /// If the slab is full or the allocation otherwise fails, returns `None`.
+    ///
+    /// # Safety
+    /// - The `slab_index` must be a valid index for the slabs
+    /// - The `size_index` must be a valid index for the size classes.
+    unsafe fn allocate_within_slab(
+        &self,
+        _slab_index: u32,
+        _size_index: usize,
+    ) -> Option<NonNull<u8>> {
+        todo!()
     }
 }
