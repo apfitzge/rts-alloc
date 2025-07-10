@@ -1,8 +1,8 @@
-use crate::{error::Error, raw_allocator::RawAllocator};
+use crate::{error::Error, header::Header};
 use core::ptr::NonNull;
 
 pub struct Allocator {
-    raw: RawAllocator,
+    header: NonNull<Header>,
     worker_index: u32,
 }
 
@@ -10,14 +10,16 @@ impl Allocator {
     /// Creates a new `Allocator` for the given worker index.
     ///
     /// # Safety
-    /// - The `raw` allocator must be initialized and valid.
-    /// - The `worker_index` must be less than the number of workers in the `raw` allocator.
-    /// - The `worker_index` must be uniquely assigned to this `Allocator` instance.
-    pub unsafe fn new(raw: RawAllocator, worker_index: u32) -> Result<Self, Error> {
-        if worker_index >= raw.header().num_workers {
+    /// - The `header` must point to a valid header of an initialized allocator.
+    pub unsafe fn new(header: NonNull<Header>, worker_index: u32) -> Result<Self, Error> {
+        // SAFETY: The header is assumed to be valid and initialized.
+        if worker_index >= unsafe { header.as_ref() }.num_workers {
             return Err(Error::InvalidWorkerIndex);
         }
-        Ok(Allocator { raw, worker_index })
+        Ok(Allocator {
+            header,
+            worker_index,
+        })
     }
 
     /// Allocates a block of memory of the given size.
