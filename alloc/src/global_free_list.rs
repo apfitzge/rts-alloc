@@ -2,6 +2,7 @@ use crate::{cache_aligned::CacheAlignedU32, index::NULL_U32};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// A singly linked-list that tracks slabs not assigned to any worker.
+/// This list is safe to use concurrently across processes.
 #[repr(C)]
 pub struct GlobalFreeList {
     head: CacheAlignedU32,
@@ -18,6 +19,20 @@ impl GlobalFreeList {
     /// Clears the head of the global free list.
     pub fn clear_head(&self) {
         self.head.store(NULL_U32, Ordering::Release);
+    }
+
+    /// Initializes the global free list as full with given `capacity`.
+    ///
+    /// # Safety
+    /// - `capacity` must be a valid size for the `list`.
+    pub fn init_full(&self, capacity: u32) {
+        self.clear_head();
+        for slab_index in (0..capacity).rev() {
+            // SAFETY: The `slab_index` is a valid index into the `list`.
+            unsafe {
+                self.push(slab_index);
+            }
+        }
     }
 
     /// Pushes `slab_index` onto the head of the global free list.
