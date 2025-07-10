@@ -9,11 +9,13 @@ pub struct Header {
     pub version: u32,
     pub num_workers: u32,
     pub num_slabs: u32,
-    pub slab_meta_offset: u32,
-    pub slab_meta_size: u32,
-    pub slab_size: u32,
-    pub slab_offset: u32,
-    pub global_free_stack: CacheAlignedU32,
+    pub global_free_stack_list_offset: u32,
+
+    // pub slab_meta_offset: u32,
+    // pub slab_meta_size: u32,
+    // pub slab_size: u32,
+    // pub slab_offset: u32,
+    pub global_free_stack_head: CacheAlignedU32,
 
     /// Trailing array of worker states.
     /// Length is `num_workers`.

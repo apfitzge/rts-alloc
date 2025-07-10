@@ -3,6 +3,7 @@ pub mod allocator;
 pub mod cache_aligned;
 pub mod error;
 pub mod free_stack;
+pub mod global_free_list;
 pub mod header;
 pub mod index;
 pub mod size_classes;
