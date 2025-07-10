@@ -8,4 +8,3 @@ pub mod header;
 pub mod index;
 pub mod size_classes;
 pub mod worker_local_list;
-pub mod worker_state;
