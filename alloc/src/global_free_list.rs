@@ -1,19 +1,22 @@
 use crate::{cache_aligned::CacheAlignedU32, index::NULL_U32};
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// A singly linked-list that tracks slabs not assigned to any worker.
 /// This list is safe to use concurrently across processes.
-#[repr(C)]
-pub struct GlobalFreeList {
-    head: CacheAlignedU32,
-    list: [AtomicU32; 0],
+pub struct GlobalFreeList<'a> {
+    head: &'a CacheAlignedU32,
+    list: NonNull<AtomicU32>,
 }
 
-impl GlobalFreeList {
-    /// Return the minimum byte size of the global free list with
-    /// given `capacity`.
-    pub const fn byte_size(capacity: usize) -> usize {
-        core::mem::size_of::<GlobalFreeList>() + capacity * core::mem::size_of::<AtomicU32>()
+impl<'a> GlobalFreeList<'a> {
+    /// Creates a new `GlobalFreeList` with the given `head` and `list`.
+    ///
+    /// # Safety
+    /// - `head` must be a valid index into the `list` or NULL_U32.
+    /// - `list` must be a valid pointer to an array of `AtomicU32` with sufficient capacity.
+    pub unsafe fn new(head: &'a CacheAlignedU32, list: NonNull<AtomicU32>) -> GlobalFreeList<'a> {
+        GlobalFreeList { head, list }
     }
 
     /// Clears the head of the global free list.
@@ -72,10 +75,6 @@ impl GlobalFreeList {
             let current_head_ref = unsafe { self.get_unchecked(current_head) };
             let next_slab_index = current_head_ref.load(Ordering::Acquire);
 
-            println!(
-                "popping slab index: {} w/ next: {}",
-                current_head, next_slab_index
-            );
             if self
                 .head
                 .compare_exchange(
@@ -103,22 +102,21 @@ impl GlobalFreeList {
 
 #[cfg(test)]
 mod tests {
+    use crate::cache_aligned::CacheAligned;
+
     use super::*;
 
     #[test]
     fn test_global_free_list() {
         const LIST_CAPACITY: usize = 1024;
-        let mut buffer = [0u8; GlobalFreeList::byte_size(LIST_CAPACITY)];
 
-        // SAFETY: The buffer is large enough to hold a GlobalFreeList with the specified capacity.
-        let global_free_list = unsafe {
-            buffer
-                .as_mut_ptr()
-                .cast::<GlobalFreeList>()
-                .as_mut()
-                .unwrap()
-        };
-        global_free_list.clear_head();
+        let head = CacheAligned(AtomicU32::new(NULL_U32));
+        let mut buffer = (0..LIST_CAPACITY)
+            .map(|_| AtomicU32::new(NULL_U32))
+            .collect::<Vec<_>>();
+
+        let global_free_list =
+            unsafe { GlobalFreeList::new(&head, NonNull::new(buffer.as_mut_ptr()).unwrap()) };
 
         // SAFETY: Pushing and popping within the capacity.
         unsafe {

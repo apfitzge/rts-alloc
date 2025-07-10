@@ -77,23 +77,3 @@ impl Allocator {
         todo!()
     }
 }
-
-impl Allocator {
-    /// Returns a reference to the global_free_stack head.
-    pub fn global_free_stack_head(&self) -> &CacheAlignedU32 {
-        // SAFETY: The header is assumed to be valid and initialized.
-        let global_free_stack_ptr = unsafe {
-            self.header
-                .byte_add(offset_of!(Header, global_free_stack_head))
-                .cast::<CacheAlignedU32>()
-        };
-
-        // SAFETY: The global free stack pointer is guaranteed to be valid by the constructor.
-        unsafe { global_free_stack_ptr.as_ref() }
-    }
-
-    /// Returns a pointer to the global free stack list.
-    pub fn global_free_stack_list(&self) -> NonNull<CacheAlignedU32> {
-        todo!()
-    }
-}
