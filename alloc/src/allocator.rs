@@ -1,5 +1,4 @@
 use crate::cache_aligned::CacheAlignedU32;
-use crate::global_free_stack;
 use crate::{
     error::Error, header::Header, size_classes::size_class_index, worker_state::WorkerState,
 };
@@ -80,10 +79,11 @@ impl Allocator {
     /// - The `size_index` must be a valid index for the size claasses.
     unsafe fn take_slab(&self, worker_state: &WorkerState, size_index: usize) -> Option<u32> {
         let head = self.global_free_stack_head();
-        let slab_index = global_free_stack::try_pop_free_slab(head, self.global_free_stack_list())?;
-        unsafe { self.mark_slab_as_assigned(slab_index, size_index) };
-        // worker_state.push_partial_slab(slab_index, size_index);
-        Some(slab_index)
+        // let slab_index = global_free_stack::try_pop_free_slab(head, self.global_free_stack_list())?;
+        // unsafe { self.mark_slab_as_assigned(slab_index, size_index) };
+        // // worker_state.push_partial_slab(slab_index, size_index);
+        // Some(slab_index)
+        todo!()
     }
 
     fn mark_slab_as_assigned(&self, _slab_index: u32, _size_index: usize) {

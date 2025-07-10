@@ -1,4 +1,4 @@
-use crate::cache_aligned::CacheAlignedU32;
+use crate::{cache_aligned::CacheAlignedU32, index::NULL_U32};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// A singly linked-list that tracks slabs not assigned to any worker.
@@ -15,11 +15,16 @@ impl GlobalFreeList {
         core::mem::size_of::<GlobalFreeList>() + capacity * core::mem::size_of::<AtomicU32>()
     }
 
+    /// Clears the head of the global free list.
+    pub fn clear_head(&self) {
+        self.head.store(NULL_U32, Ordering::Release);
+    }
+
     /// Pushes `slab_index` onto the head of the global free list.
     ///
     /// # Safety
     /// - `slab_index` must be a valid index into the `list`.
-    pub fn push(&self, slab_index: u32) {
+    pub unsafe fn push(&self, slab_index: u32) {
         // SAFETY: The `slab_index` is assumed to be a valid index into the `list`.
         let next_head_ref = unsafe { self.get_unchecked(slab_index) };
         loop {
@@ -40,6 +45,38 @@ impl GlobalFreeList {
         }
     }
 
+    /// Pops a slab index from the head of the global free list.
+    /// Returns `None` if the list is empty.
+    pub fn pop(&self) -> Option<u32> {
+        loop {
+            let current_head = self.head.load(Ordering::Acquire);
+            if current_head == NULL_U32 {
+                return None; // The list is empty
+            }
+
+            let current_head_ref = unsafe { self.get_unchecked(current_head) };
+            let next_slab_index = current_head_ref.load(Ordering::Acquire);
+
+            println!(
+                "popping slab index: {} w/ next: {}",
+                current_head, next_slab_index
+            );
+            if self
+                .head
+                .compare_exchange(
+                    current_head,
+                    next_slab_index,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                current_head_ref.store(NULL_U32, Ordering::Release);
+                return Some(current_head); // Successfully popped the slab index
+            }
+        }
+    }
+
     /// Get reference to a specific slab indexes `AtomicU32`.
     ///
     /// # Safety
@@ -54,7 +91,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_push_global_free_list() {
+    fn test_global_free_list() {
         const LIST_CAPACITY: usize = 1024;
         let mut buffer = [0u8; GlobalFreeList::byte_size(LIST_CAPACITY)];
 
@@ -66,8 +103,29 @@ mod tests {
                 .as_mut()
                 .unwrap()
         };
+        global_free_list.clear_head();
 
-        // Push a slab index onto the global free list.
-        global_free_list.push(0);
+        // SAFETY: Pushing and popping within the capacity.
+        unsafe {
+            let range = 0..3;
+            for index in range.clone() {
+                global_free_list.push(index);
+            }
+
+            for index in range.clone().rev() {
+                assert_eq!(global_free_list.pop(), Some(index));
+            }
+            assert_eq!(global_free_list.pop(), None);
+
+            // check that the links have been cleared
+            for index in range {
+                assert_eq!(
+                    global_free_list
+                        .get_unchecked(index)
+                        .load(Ordering::Acquire),
+                    NULL_U32
+                );
+            }
+        }
     }
 }
