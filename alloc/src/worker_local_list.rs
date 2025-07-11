@@ -20,6 +20,15 @@ impl<'a> WorkerLocalList<'a> {
         Self { head, list }
     }
 
+    /// Returns the head of the worker local list.
+    pub fn head(&self) -> Option<u32> {
+        if *self.head != NULL_U32 {
+            Some(*self.head)
+        } else {
+            None
+        }
+    }
+
     /// Initializes the worker local list as empty with given `capacity`.
     /// # Safety
     /// - `capacity` must be a valid size for the `list`.

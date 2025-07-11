@@ -2,6 +2,7 @@ use crate::{
     cache_aligned::{CacheAligned, CacheAlignedU32},
     size_classes::NUM_SIZE_CLASSES,
 };
+use core::sync::atomic::AtomicU32;
 
 pub const MAGIC: u64 = 0x727473616c6f63; // "rtsaloc"
 pub const VERSION: u32 = 1;

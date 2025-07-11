@@ -1,4 +1,8 @@
-use crate::cache_aligned::CacheAlignedU32;
+use crate::free_list_element::FreeListElement;
+use crate::global_free_list::GlobalFreeList;
+use crate::header::WorkerLocalListHeads;
+use crate::slab_meta::SlabMeta;
+use crate::worker_local_list::WorkerLocalList;
 use crate::{error::Error, header::Header, size_classes::size_class_index};
 use core::mem::offset_of;
 use core::ptr::NonNull;
@@ -45,7 +49,10 @@ impl Allocator {
     /// # Safety
     /// - The `size_index` must be a valid index for the size classes.
     unsafe fn find_allocatable_slab_index(&self, size_index: usize) -> Option<u32> {
-        todo!()
+        // SAFETY: `size_index` is guaranteed to be valid by the caller.
+        unsafe { self.worker_local_list(size_index) }
+            .head()
+            .or_else(|| self.take_slab(size_index))
     }
 
     /// Attempt to allocate meomry within a slab.
@@ -67,13 +74,74 @@ impl Allocator {
     /// If the slab is successfully taken, it will be marked as assigned to the worker.
     ///
     /// # Safety
-    /// - The `worker_state` must be valid and initialized.
     /// - The `size_index` must be a valid index for the size claasses.
     unsafe fn take_slab(&self, size_index: usize) -> Option<u32> {
-        todo!()
+        let slab_index = self.global_free_list().pop()?;
+        // SAFETY: The slab index is guaranteed to be valid by `pop`.
+        unsafe { self.slab_meta(slab_index).as_ref() }.assign(self.worker_index, size_index);
+        // SAFETY: The size index is guaranteed to be valid by caller.
+        let mut worker_local_list = unsafe { self.worker_local_list(size_index) };
+        // SAFETY: The slab index is guaranteed to be valid by `pop`.
+        unsafe { worker_local_list.push(slab_index) };
+        Some(slab_index)
+    }
+}
+
+impl Allocator {
+    /// Returns a pointer to the free list elements in allocator.
+    pub fn free_list_elements(&self) -> NonNull<FreeListElement> {
+        // SAFETY: The header is assumed to be valid and initialized.
+        let offset = unsafe { self.header.as_ref() }.free_list_elements_offset;
+        // SAFETY: The header is guaranteed to be valid and initialized.
+        unsafe { self.header.byte_add(offset as usize) }.cast()
     }
 
-    fn mark_slab_as_assigned(&self, _slab_index: u32, _size_index: usize) {
-        todo!()
+    /// Returns a `GlobalFreeList` to interact with the global free list.
+    pub fn global_free_list(&self) -> GlobalFreeList {
+        // SAFETY: The header is assumed to be valid and initialized.
+        let head = &unsafe { self.header.as_ref() }.global_free_list_head;
+        let list = self.free_list_elements();
+        // SAFETY:
+        // - `head` is a valid reference to the global free list head.
+        // - `list` is guaranteed to be valid wtih sufficient capacity.
+        unsafe { GlobalFreeList::new(head, list) }
+    }
+
+    /// Returns a `WorkerLocalList` for the current worker to interact with its
+    /// local free list.
+    ///
+    /// # Safety
+    /// - The `size_index` must be a valid index for the size classes.
+    pub unsafe fn worker_local_list(&self, size_index: usize) -> WorkerLocalList {
+        let head = {
+            // SAFETY: The header is assumed to be valid and initialized.
+            let all_workers_heads = unsafe {
+                self.header
+                    .byte_add(offset_of!(Header, worker_local_list_heads))
+                    .cast::<WorkerLocalListHeads>()
+            };
+            // SAFETY: The worker index is guaranteed to be valid by the constructor.
+            let worker_heads = unsafe { all_workers_heads.add(self.worker_index as usize) };
+            // SAFETY: The size index is guaranteed to be valid by the caller.
+            unsafe { worker_heads.cast::<u32>().add(size_index).as_mut() }
+        };
+        let list = self.free_list_elements();
+        // SAFETY:
+        // - `head` is a valid reference to the worker's local list head.
+        // - `list` is guaranteed to be valid with sufficient capacity.
+        unsafe { WorkerLocalList::new(head, list) }
+    }
+
+    /// Returns a pointer to the slab meta for the given slab index.
+    ///
+    /// # Safety
+    /// - The `slab_index` must be a valid index for the slabs.
+    pub unsafe fn slab_meta(&self, slab_index: u32) -> NonNull<SlabMeta> {
+        // SAFETY: The header is assumed to be valid and initialized.
+        let offset = unsafe { self.header.as_ref() }.slab_shared_meta_offset;
+        // SAFETY: The header is guaranteed to be valid and initialized.
+        let slab_metas = unsafe { self.header.byte_add(offset as usize).cast::<SlabMeta>() };
+        // SAFETY: The `slab_index` is guaranteed to be valid by the caller.
+        unsafe { slab_metas.add(slab_index as usize) }
     }
 }
