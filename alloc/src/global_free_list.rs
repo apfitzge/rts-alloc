@@ -28,7 +28,7 @@ impl<'a> GlobalFreeList<'a> {
     ///
     /// # Safety
     /// - `capacity` must be a valid size for the `list`.
-    pub fn init_full(&self, capacity: u32) {
+    pub unsafe fn init_full(&self, capacity: u32) {
         self.clear_head();
         for slab_index in (0..capacity).rev() {
             // SAFETY: The `slab_index` is a valid index into the `list`.
