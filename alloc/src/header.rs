@@ -19,6 +19,15 @@ pub struct Header {
     /// The size in bytes of each slab.
     pub slab_size: u32,
 
+    /// The offset in bytes to the free list elements.
+    pub free_list_elements_offset: u32,
+    /// The offset in bytes to the slab shared metadata.
+    pub slab_shared_meta_offset: u32,
+    /// The offset in bytes to the slab free stacks.
+    pub slab_free_stacks_offset: u32,
+    /// The offset in bytes to the slabs.
+    pub slabs_offset: u32,
+
     /// The head of the global free list.
     pub global_free_list_head: CacheAlignedU32,
     /// The heads of the per-worker local free lists.
@@ -29,7 +38,6 @@ pub struct Header {
 // Padding used to ensure proper alignment between components.
 //
 // [header]
-// [global_free_list_head]
 // [worker_local_list_heads; num_workers]
 // [free_list_elements; num_slabs]
 // [slab_shared_meta]
@@ -37,13 +45,16 @@ pub struct Header {
 // [slabs]
 pub mod layout {
     use crate::{
-        align::round_to_next_alignment_of, free_list_element::FreeListElement,
-        free_stack::FreeStack, header::WorkerLocalListHeads, slab_meta::SlabMeta,
+        align::round_to_next_alignment_of,
+        free_list_element::FreeListElement,
+        free_stack::FreeStack,
+        header::{Header, WorkerLocalListHeads},
+        slab_meta::SlabMeta,
     };
 
     /// The size of the header in bytes.
     pub const fn header_size() -> usize {
-        core::mem::size_of::<super::Header>()
+        core::mem::size_of::<Header>()
     }
 
     /// The size of the worker local list heads in bytes with trailing padding.
