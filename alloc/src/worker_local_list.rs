@@ -28,7 +28,7 @@ impl<'a> WorkerLocalList<'a> {
         for slab_index in 0..capacity {
             // SAFETY: The `slab_index` is a valid index into the `list
             unsafe {
-                let node = self.get_unchecked_mut(slab_index);
+                let node = self.get_unchecked(slab_index);
                 node.worker_local_prev.store(NULL_U32, Ordering::Release);
                 node.worker_local_next.store(NULL_U32, Ordering::Release);
             }
@@ -43,7 +43,8 @@ impl<'a> WorkerLocalList<'a> {
         let current_head = *self.head;
 
         {
-            let pushed_node = unsafe { self.get_unchecked_mut(slab_index) };
+            // SAFETY: The `slab_index` is assumed to be a valid index into the `list`.
+            let pushed_node = unsafe { self.get_unchecked(slab_index) };
             pushed_node
                 .worker_local_prev
                 .store(NULL_U32, Ordering::Release);
@@ -54,7 +55,7 @@ impl<'a> WorkerLocalList<'a> {
 
         if current_head != NULL_U32 {
             // SAFETY: The `current_head` is assumed to be a valid index into the `list`.
-            let current_head_ref = unsafe { self.get_unchecked_mut(current_head) };
+            let current_head_ref = unsafe { self.get_unchecked(current_head) };
             current_head_ref
                 .worker_local_prev
                 .store(slab_index, Ordering::Release);
@@ -71,7 +72,7 @@ impl<'a> WorkerLocalList<'a> {
     pub unsafe fn remove(&mut self, slab_index: u32) {
         let (prev, next) = {
             // SAFETY: The `slab_index` is assumed to be a valid index into the `list`.
-            let current_node = unsafe { self.get_unchecked_mut(slab_index) };
+            let current_node = unsafe { self.get_unchecked(slab_index) };
             (
                 current_node
                     .worker_local_prev
@@ -84,7 +85,7 @@ impl<'a> WorkerLocalList<'a> {
 
         if prev != NULL_U32 {
             // SAFETY: The `prev` is assumed to be a valid index into the `list`.
-            let prev_node = unsafe { self.get_unchecked_mut(prev) };
+            let prev_node = unsafe { self.get_unchecked(prev) };
             prev_node.worker_local_next.store(next, Ordering::Release);
         } else {
             // If there is no previous node, we are at the head.
@@ -93,18 +94,20 @@ impl<'a> WorkerLocalList<'a> {
 
         if next != NULL_U32 {
             // SAFETY: The `next` is assumed to be a valid index into the `list`.
-            let next_node = unsafe { self.get_unchecked_mut(next) };
+            let next_node = unsafe { self.get_unchecked(next) };
             next_node.worker_local_prev.store(prev, Ordering::Release);
         }
     }
 
-    pub unsafe fn iterate(&self) -> impl Iterator<Item = u32> + '_ {
+    /// Iterates over the worker local list.
+    pub fn iterate(&self) -> impl Iterator<Item = u32> + '_ {
         let mut current_head = *self.head;
         core::iter::from_fn(move || {
             if current_head == NULL_U32 {
                 return None; // End of the list
             }
             let ret = Some(current_head);
+            // SAFETY: The `current_head` is assumed to be a valid index into the `list`.
             let current_node = unsafe { self.get_unchecked(current_head) };
             let next_index = current_node.worker_local_next.load(Ordering::Acquire);
             current_head = next_index;
@@ -118,14 +121,6 @@ impl<'a> WorkerLocalList<'a> {
     /// - The `slab_index` must be a valid index into the `list`.
     unsafe fn get_unchecked(&self, slab_index: u32) -> &FreeListElement {
         self.list.add(slab_index as usize).as_ref()
-    }
-
-    /// Get mutable reference to a specific slab indexes `FreeListElement`.
-    ///
-    /// # Safety
-    /// - The `slab_index` must be a valid index into the `list`.
-    unsafe fn get_unchecked_mut(&mut self, slab_index: u32) -> &mut FreeListElement {
-        self.list.add(slab_index as usize).as_mut()
     }
 }
 
