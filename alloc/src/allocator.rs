@@ -1,6 +1,8 @@
 use crate::free_list_element::FreeListElement;
+use crate::free_stack::FreeStack;
 use crate::global_free_list::GlobalFreeList;
-use crate::header::WorkerLocalListHeads;
+use crate::header::{self, WorkerLocalListHeads};
+use crate::size_classes::size_class;
 use crate::slab_meta::SlabMeta;
 use crate::worker_local_list::WorkerLocalList;
 use crate::{error::Error, header::Header, size_classes::size_class_index};
@@ -63,10 +65,30 @@ impl Allocator {
     /// - The `size_index` must be a valid index for the size classes.
     unsafe fn allocate_within_slab(
         &self,
-        _slab_index: u32,
-        _size_index: usize,
+        slab_index: u32,
+        size_index: usize,
     ) -> Option<NonNull<u8>> {
-        todo!()
+        // SAFETY: The slab index is guaranteed to be valid by the caller.
+        let free_stack = unsafe { self.slab_free_stack(slab_index) };
+        let maybe_index_within_slab = free_stack.pop();
+
+        // If the slab is empty - remove it from the worker's local list.
+        if free_stack.is_empty() {
+            // SAFETY:
+            // - The `slab_index` is guaranteed to be valid by the caller.
+            // - The `size_index` is guaranteed to be valid by the caller.
+            unsafe {
+                self.worker_local_list(size_index).remove(slab_index);
+            }
+        }
+
+        maybe_index_within_slab.map(|index_within_slab| {
+            // SAFETY: The `slab_index` is guaranteed to be valid by the caller.
+            let slab = unsafe { self.slab(slab_index) };
+            // SAFETY: The `size_index` is guaranteed to be valid by the caller.
+            let size = unsafe { size_class(size_index) };
+            slab.byte_add(index_within_slab as usize * size as usize)
+        })
     }
 
     /// Attempt to take a slab from the global free list.
@@ -143,5 +165,46 @@ impl Allocator {
         let slab_metas = unsafe { self.header.byte_add(offset as usize).cast::<SlabMeta>() };
         // SAFETY: The `slab_index` is guaranteed to be valid by the caller.
         unsafe { slab_metas.add(slab_index as usize) }
+    }
+
+    /// Return a reference to a free stack for the given slab index.
+    ///
+    /// # Safety
+    /// - The `slab_index` must be a valid index for the slabs.
+    pub unsafe fn slab_free_stack(&self, slab_index: u32) -> &FreeStack {
+        let (slab_size, offset) = {
+            // SAFETY: The header is assumed to be valid and initialized.
+            let header = unsafe { self.header.as_ref() };
+            (header.slab_size, header.slab_free_stacks_offset)
+        };
+        let free_stack_size = header::layout::free_stacks_size(slab_size);
+
+        // SAFETY: The header is guaranteed to be valid and initialized.
+        // The free stacks are laid out sequentially after the slab meta.
+        self.header
+            .byte_add(offset as usize)
+            .byte_add(slab_index as usize * free_stack_size)
+            .cast()
+            .as_ref()
+    }
+
+    /// Return a pointer to a slab.
+    ///
+    /// # Safety
+    /// - The `slab_index` must be a valid index for the slabs.
+    pub unsafe fn slab(&self, slab_index: u32) -> NonNull<u8> {
+        let (slab_size, offset) = {
+            // SAFETY: The header is assumed to be valid and initialized.
+            let header = unsafe { self.header.as_ref() };
+            (header.slab_size, header.slabs_offset)
+        };
+        // SAFETY: The header is guaranteed to be valid and initialized.
+        // The slabs are laid out sequentially after the free stacks.
+        unsafe {
+            self.header
+                .byte_add(offset as usize)
+                .byte_add(slab_index as usize * slab_size as usize)
+                .cast()
+        }
     }
 }

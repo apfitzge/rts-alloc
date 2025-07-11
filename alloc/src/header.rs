@@ -50,6 +50,7 @@ pub mod layout {
         free_list_element::FreeListElement,
         free_stack::FreeStack,
         header::{Header, WorkerLocalListHeads},
+        size_classes::MIN_SIZE,
         slab_meta::SlabMeta,
     };
 
@@ -80,7 +81,8 @@ pub mod layout {
     }
 
     /// The size of the free stacks in bytes WITHOUT trailing padding.
-    pub const fn free_stacks_size(num_slabs: u32) -> usize {
-        FreeStack::byte_size(num_slabs as u16)
+    pub const fn free_stacks_size(slab_size: u32) -> usize {
+        let max_capacity = slab_size / MIN_SIZE;
+        FreeStack::byte_size(max_capacity as u16)
     }
 }
