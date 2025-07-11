@@ -16,6 +16,11 @@ pub struct FreeStack {
 }
 
 impl FreeStack {
+    /// Returns the size in bytes of a `FreeStack` with the given `capacity`.
+    pub const fn byte_size(capacity: u16) -> usize {
+        core::mem::size_of::<FreeStack>() + (capacity as usize * core::mem::size_of::<u16>())
+    }
+
     /// Sets up the free stack with all items free.
     ///
     /// # Safety

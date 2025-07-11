@@ -1,18 +1,13 @@
-use crate::index::NULL_U32;
+use crate::{free_list_element::FreeListElement, index::NULL_U32};
 use core::ptr::NonNull;
+use std::sync::atomic::Ordering;
 
 /// A doubly linked-list that tracks slabs assigned to a worker.
 /// This list is not safe to use concurrently across processes,
 /// and should only be accessed by the associated worker.
 pub struct WorkerLocalList<'a> {
     head: &'a mut u32,
-    list: NonNull<LinkedListNode>,
-}
-
-#[repr(C)]
-pub struct LinkedListNode {
-    prev: u32,
-    next: u32,
+    list: NonNull<FreeListElement>,
 }
 
 impl<'a> WorkerLocalList<'a> {
@@ -20,8 +15,8 @@ impl<'a> WorkerLocalList<'a> {
     ///
     /// # Safety
     /// - `head` must be a valid index into the `list` or NULL_U32.
-    /// - `list` must be a valid pointer to an array of `LinkedListNode` with sufficient capacity.
-    pub unsafe fn new(head: &'a mut u32, list: NonNull<LinkedListNode>) -> Self {
+    /// - `list` must be a valid pointer to an array of `FreeListElement` with sufficient capacity.
+    pub unsafe fn new(head: &'a mut u32, list: NonNull<FreeListElement>) -> Self {
         Self { head, list }
     }
 
@@ -34,8 +29,8 @@ impl<'a> WorkerLocalList<'a> {
             // SAFETY: The `slab_index` is a valid index into the `list
             unsafe {
                 let node = self.get_unchecked_mut(slab_index);
-                node.prev = NULL_U32;
-                node.next = NULL_U32;
+                node.worker_local_prev.store(NULL_U32, Ordering::Release);
+                node.worker_local_next.store(NULL_U32, Ordering::Release);
             }
         }
     }
@@ -49,18 +44,20 @@ impl<'a> WorkerLocalList<'a> {
 
         {
             let pushed_node = unsafe { self.get_unchecked_mut(slab_index) };
-            pushed_node.prev = NULL_U32;
-            pushed_node.next = current_head;
+            pushed_node
+                .worker_local_prev
+                .store(NULL_U32, Ordering::Release);
+            pushed_node
+                .worker_local_next
+                .store(current_head, Ordering::Release);
         }
 
         if current_head != NULL_U32 {
             // SAFETY: The `current_head` is assumed to be a valid index into the `list`.
             let current_head_ref = unsafe { self.get_unchecked_mut(current_head) };
-            debug_assert_eq!(
-                current_head_ref.prev, NULL_U32,
-                "current head should have NULL prev"
-            );
-            current_head_ref.prev = slab_index;
+            current_head_ref
+                .worker_local_prev
+                .store(slab_index, Ordering::Release);
         }
 
         *self.head = slab_index;
@@ -76,15 +73,19 @@ impl<'a> WorkerLocalList<'a> {
             // SAFETY: The `slab_index` is assumed to be a valid index into the `list`.
             let current_node = unsafe { self.get_unchecked_mut(slab_index) };
             (
-                core::mem::replace(&mut current_node.prev, NULL_U32),
-                core::mem::replace(&mut current_node.next, NULL_U32),
+                current_node
+                    .worker_local_prev
+                    .swap(NULL_U32, Ordering::AcqRel),
+                current_node
+                    .worker_local_next
+                    .swap(NULL_U32, Ordering::AcqRel),
             )
         };
 
         if prev != NULL_U32 {
             // SAFETY: The `prev` is assumed to be a valid index into the `list`.
             let prev_node = unsafe { self.get_unchecked_mut(prev) };
-            prev_node.next = next;
+            prev_node.worker_local_next.store(next, Ordering::Release);
         } else {
             // If there is no previous node, we are at the head.
             *self.head = next;
@@ -93,7 +94,7 @@ impl<'a> WorkerLocalList<'a> {
         if next != NULL_U32 {
             // SAFETY: The `next` is assumed to be a valid index into the `list`.
             let next_node = unsafe { self.get_unchecked_mut(next) };
-            next_node.prev = prev;
+            next_node.worker_local_prev.store(prev, Ordering::Release);
         }
     }
 
@@ -105,25 +106,25 @@ impl<'a> WorkerLocalList<'a> {
             }
             let ret = Some(current_head);
             let current_node = unsafe { self.get_unchecked(current_head) };
-            let next_index = current_node.next;
+            let next_index = current_node.worker_local_next.load(Ordering::Acquire);
             current_head = next_index;
             ret
         })
     }
 
-    /// Get reference to a specific slab indexes `LinkedListNode`.
+    /// Get reference to a specific slab indexes `FreeListElement`.
     ///
     /// # Safety
     /// - The `slab_index` must be a valid index into the `list`.
-    unsafe fn get_unchecked(&self, slab_index: u32) -> &LinkedListNode {
+    unsafe fn get_unchecked(&self, slab_index: u32) -> &FreeListElement {
         self.list.add(slab_index as usize).as_ref()
     }
 
-    /// Get mutable reference to a specific slab indexes `LinkedListNode`.
+    /// Get mutable reference to a specific slab indexes `FreeListElement`.
     ///
     /// # Safety
     /// - The `slab_index` must be a valid index into the `list`.
-    unsafe fn get_unchecked_mut(&mut self, slab_index: u32) -> &mut LinkedListNode {
+    unsafe fn get_unchecked_mut(&mut self, slab_index: u32) -> &mut FreeListElement {
         self.list.add(slab_index as usize).as_mut()
     }
 }
@@ -131,15 +132,17 @@ impl<'a> WorkerLocalList<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::sync::atomic::AtomicU32;
 
     #[test]
     fn test_worker_local_list() {
         const LIST_CAPACITY: u32 = 1024;
         let mut head = NULL_U32;
         let mut buffer = (0..LIST_CAPACITY)
-            .map(|_| LinkedListNode {
-                prev: NULL_U32,
-                next: NULL_U32,
+            .map(|_| FreeListElement {
+                global_next: AtomicU32::new(NULL_U32),
+                worker_local_prev: AtomicU32::new(NULL_U32),
+                worker_local_next: AtomicU32::new(NULL_U32),
             })
             .collect::<Vec<_>>();
         let mut worker_local_list =

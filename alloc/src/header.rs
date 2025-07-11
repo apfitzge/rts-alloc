@@ -1,7 +1,12 @@
-use crate::cache_aligned::CacheAlignedU32;
+use crate::{
+    cache_aligned::{CacheAligned, CacheAlignedU32},
+    size_classes::NUM_SIZE_CLASSES,
+};
 
 pub const MAGIC: u64 = 0x727473616c6f63; // "rtsaloc"
 pub const VERSION: u32 = 1;
+
+pub type WorkerLocalListHeads = CacheAligned<[u32; NUM_SIZE_CLASSES]>;
 
 #[repr(C)]
 pub struct Header {
@@ -17,7 +22,7 @@ pub struct Header {
     /// The head of the global free list.
     pub global_free_list_head: CacheAlignedU32,
     /// The heads of the per-worker local free lists.
-    pub worker_local_list_heads: [CacheAlignedU32; 0],
+    pub worker_local_list_heads: [WorkerLocalListHeads; 0],
 }
 
 // Layout of the allocator.
@@ -26,38 +31,44 @@ pub struct Header {
 // [header]
 // [global_free_list_head]
 // [worker_local_list_heads; num_workers]
-// [global_free_list; num_slabs]
-// [worker_local_list; num_slabs]
+// [free_list_elements; num_slabs]
 // [slab_shared_meta]
 // [slab_free_stacks]
 // [slabs]
-mod layout {
-    use crate::{align::round_to_next_alignment_of, global_free_list::GlobalFreeList};
+pub mod layout {
+    use crate::{
+        align::round_to_next_alignment_of, free_list_element::FreeListElement,
+        free_stack::FreeStack, header::WorkerLocalListHeads, slab_meta::SlabMeta,
+    };
 
     /// The size of the header in bytes.
     pub const fn header_size() -> usize {
         core::mem::size_of::<super::Header>()
     }
-}
 
-// Layout of the local lists for each worker.
-//
-// [worker_0_ll_for_size_class_0][worker_0_ll_for_size_class_1]...[worker_0_ll_for_size_class_n]
-// [worker_1_ll_for_size_class_0][worker_1_ll_for_size_class_1]...[worker_1_ll_for_size_class_n]
-// ...
-//
-// [worker_n_ll_for_size_class_0][worker_n_ll_for_size_class_1]...[worker_n_ll_for_size_class_n]
-mod worker_local_lists {
-    use crate::worker_local_list::WorkerLocalList;
-
-    /// Calculate the total size in bytes of the worker local lists for all workers.
-    pub const fn total_size(num_workers: u32, num_slabs: u32) -> usize {
-        // WorkerLocalList::byte_size(num_slabs as usize) * num_workers as usize * num_slabs as usize
-        todo!()
+    /// The size of the worker local list heads in bytes with trailing padding.
+    pub const fn padded_worker_local_list_heads_size(num_workers: u32) -> usize {
+        const FREE_LIST_ELEMENT_ALIGNMENT: usize = core::mem::align_of::<FreeListElement>();
+        let size = core::mem::size_of::<WorkerLocalListHeads>() * num_workers as usize;
+        round_to_next_alignment_of::<FREE_LIST_ELEMENT_ALIGNMENT>(size)
     }
 
-    /// Calculate the offset of the worker local list for a given `worker_index` and `size_class_index`.
-    pub const fn offset_of(worker_index: u32, size_class_index: usize) -> usize {
-        todo!()
+    /// The size of the free list elements in bytes with trailing padding.
+    pub const fn padded_free_list_elements_size(num_slabs: u32) -> usize {
+        const SLAB_META_ALIGNMENT: usize = core::mem::align_of::<SlabMeta>();
+        let size = core::mem::size_of::<FreeListElement>() * num_slabs as usize;
+        round_to_next_alignment_of::<SLAB_META_ALIGNMENT>(size)
+    }
+
+    /// The size of the slab meta in bytes with trailing padding.
+    pub const fn padded_slab_meta_size(num_slabs: u32) -> usize {
+        const FREE_STACK_ALIGNMENT: usize = core::mem::align_of::<FreeStack>();
+        let size = core::mem::size_of::<SlabMeta>() * num_slabs as usize;
+        round_to_next_alignment_of::<FREE_STACK_ALIGNMENT>(size)
+    }
+
+    /// The size of the free stacks in bytes WITHOUT trailing padding.
+    pub const fn free_stacks_size(num_slabs: u32) -> usize {
+        FreeStack::byte_size(num_slabs as u16)
     }
 }
