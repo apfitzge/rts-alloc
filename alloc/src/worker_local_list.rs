@@ -1,12 +1,12 @@
 use crate::index::NULL_U32;
+use core::ptr::NonNull;
 
 /// A doubly linked-list that tracks slabs assigned to a worker.
 /// This list is not safe to use concurrently across processes,
 /// and should only be accessed by the associated worker.
-#[repr(C)]
-pub struct WorkerLocalList {
-    head: u32,
-    list: [LinkedListNode; 0],
+pub struct WorkerLocalList<'a> {
+    head: &'a mut u32,
+    list: NonNull<LinkedListNode>,
 }
 
 #[repr(C)]
@@ -15,18 +15,21 @@ pub struct LinkedListNode {
     next: u32,
 }
 
-impl WorkerLocalList {
-    /// Return the minimum byte size of the worker local list with
-    /// given `capacity`.
-    pub const fn byte_size(capacity: usize) -> usize {
-        core::mem::size_of::<WorkerLocalList>() + capacity * core::mem::size_of::<LinkedListNode>()
+impl<'a> WorkerLocalList<'a> {
+    /// Creates a new `WorkerLocalList` with the given `head` and `list`.
+    ///
+    /// # Safety
+    /// - `head` must be a valid index into the `list` or NULL_U32.
+    /// - `list` must be a valid pointer to an array of `LinkedListNode` with sufficient capacity.
+    pub unsafe fn new(head: &'a mut u32, list: NonNull<LinkedListNode>) -> Self {
+        Self { head, list }
     }
 
     /// Initializes the worker local list as empty with given `capacity`.
     /// # Safety
     /// - `capacity` must be a valid size for the `list`.
     pub unsafe fn initialize_as_empty(&mut self, capacity: u32) {
-        self.head = NULL_U32;
+        *self.head = NULL_U32;
         for slab_index in 0..capacity {
             // SAFETY: The `slab_index` is a valid index into the `list
             unsafe {
@@ -42,7 +45,7 @@ impl WorkerLocalList {
     /// # Safety
     /// - `slab_index` must be a valid index into the `list`.
     pub unsafe fn push(&mut self, slab_index: u32) {
-        let current_head = self.head;
+        let current_head = *self.head;
 
         {
             let pushed_node = unsafe { self.get_unchecked_mut(slab_index) };
@@ -60,7 +63,7 @@ impl WorkerLocalList {
             current_head_ref.prev = slab_index;
         }
 
-        self.head = slab_index;
+        *self.head = slab_index;
     }
 
     /// Remove a slab from the list.
@@ -84,7 +87,7 @@ impl WorkerLocalList {
             prev_node.next = next;
         } else {
             // If there is no previous node, we are at the head.
-            self.head = next;
+            *self.head = next;
         };
 
         if next != NULL_U32 {
@@ -95,7 +98,7 @@ impl WorkerLocalList {
     }
 
     pub unsafe fn iterate(&self) -> impl Iterator<Item = u32> + '_ {
-        let mut current_head = self.head;
+        let mut current_head = *self.head;
         core::iter::from_fn(move || {
             if current_head == NULL_U32 {
                 return None; // End of the list
@@ -113,7 +116,7 @@ impl WorkerLocalList {
     /// # Safety
     /// - The `slab_index` must be a valid index into the `list`.
     unsafe fn get_unchecked(&self, slab_index: u32) -> &LinkedListNode {
-        &*self.list.as_ptr().add(slab_index as usize)
+        self.list.add(slab_index as usize).as_ref()
     }
 
     /// Get mutable reference to a specific slab indexes `LinkedListNode`.
@@ -121,7 +124,7 @@ impl WorkerLocalList {
     /// # Safety
     /// - The `slab_index` must be a valid index into the `list`.
     unsafe fn get_unchecked_mut(&mut self, slab_index: u32) -> &mut LinkedListNode {
-        &mut *self.list.as_mut_ptr().add(slab_index as usize)
+        self.list.add(slab_index as usize).as_mut()
     }
 }
 
@@ -132,11 +135,15 @@ mod tests {
     #[test]
     fn test_worker_local_list() {
         const LIST_CAPACITY: u32 = 1024;
-        let mut buffer = [0u8; WorkerLocalList::byte_size(LIST_CAPACITY as usize)];
-        let worker_local_list = unsafe { &mut *(buffer.as_mut_ptr() as *mut WorkerLocalList) };
-        unsafe {
-            worker_local_list.initialize_as_empty(LIST_CAPACITY);
-        }
+        let mut head = NULL_U32;
+        let mut buffer = (0..LIST_CAPACITY)
+            .map(|_| LinkedListNode {
+                prev: NULL_U32,
+                next: NULL_U32,
+            })
+            .collect::<Vec<_>>();
+        let mut worker_local_list =
+            unsafe { WorkerLocalList::new(&mut head, NonNull::new(buffer.as_mut_ptr()).unwrap()) };
 
         // Test removal orders:
         // - [head, head, head]

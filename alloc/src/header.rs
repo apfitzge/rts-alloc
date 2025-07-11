@@ -52,12 +52,12 @@ mod worker_local_lists {
 
     /// Calculate the total size in bytes of the worker local lists for all workers.
     pub const fn total_size(num_workers: u32, num_slabs: u32) -> usize {
-        WorkerLocalList::byte_size(num_slabs as usize) * num_workers as usize * num_slabs as usize
+        // WorkerLocalList::byte_size(num_slabs as usize) * num_workers as usize * num_slabs as usize
+        todo!()
     }
 
     /// Calculate the offset of the worker local list for a given `worker_index` and `size_class_index`.
     pub const fn offset_of(worker_index: u32, size_class_index: usize) -> usize {
-        let worker_size = WorkerLocalList::byte_size(size_class_index);
-        worker_size * worker_index as usize * size_class_index as usize
+        todo!()
     }
 }
