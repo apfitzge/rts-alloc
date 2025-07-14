@@ -57,6 +57,48 @@ pub mod layout {
         slab_meta::SlabMeta,
     };
 
+    pub struct AllocatorLayout {
+        /// The number of slabs in the allocator.
+        pub num_slabs: u32,
+        /// The offset in bytes to the free list elements.
+        pub free_list_elements_offset: u32,
+        /// The offset in bytes to the slab shared metadata.
+        pub slab_shared_meta_offset: u32,
+        /// The offset in bytes to the slab free stacks.
+        pub slab_free_stacks_offset: u32,
+        /// The offset in bytes to the slabs.
+        pub slabs_offset: u32,
+    }
+
+    pub fn offsets(file_size: usize, slab_size: u32, num_workers: u32) -> AllocatorLayout {
+        let mut offset = header_size();
+        offset += worker_local_list_heads_size(num_workers);
+        offset = pad_for_free_list_elements(offset);
+        let free_list_elements_offset = offset as u32;
+
+        offset += free_list_elements_size(num_workers);
+        offset = pad_for_slab_meta(offset);
+        let slab_shared_meta_offset = offset as u32;
+
+        offset += slab_meta_size(num_workers);
+        offset = pad_for_slab_free_stacks(offset);
+        let slab_free_stacks_offset = offset as u32;
+
+        offset += free_stacks_size(num_workers, slab_size);
+        offset = pad_for_slabs(offset, slab_size);
+        let slabs_offset = offset as u32;
+
+        let num_slabs = (file_size as u32 - slabs_offset) / slab_size;
+
+        AllocatorLayout {
+            num_slabs,
+            free_list_elements_offset,
+            slab_shared_meta_offset,
+            slab_free_stacks_offset,
+            slabs_offset,
+        }
+    }
+
     /// The size of the header in bytes.
     pub const fn header_size() -> usize {
         core::mem::size_of::<Header>()

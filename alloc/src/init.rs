@@ -1,0 +1,229 @@
+use crate::{
+    allocator::Allocator,
+    error::Error,
+    free_list_element::FreeListElement,
+    header::{
+        layout::{self, AllocatorLayout},
+        Header, WorkerLocalListHeads,
+    },
+    index::NULL_U32,
+    size_classes::{MAX_SIZE, MIN_SIZE},
+};
+use std::{
+    fs::File,
+    mem::offset_of,
+    os::{fd::AsRawFd, raw::c_void},
+    path::Path,
+    ptr::NonNull,
+    sync::atomic::Ordering,
+};
+
+/// Create and initialize the allocator.
+pub fn create(
+    path: impl AsRef<Path>,
+    file_size: usize,
+    num_workers: u32,
+    slab_size: u32,
+    worker_index: u32,
+    delete_existing: bool,
+) -> Result<Allocator, Error> {
+    // Verify that requested parameters are valid.
+    if worker_index >= num_workers {
+        return Err(Error::InvalidWorkerIndex);
+    }
+    verify_slab_size(slab_size)?;
+
+    // Given parameters, calculate layout.
+    let AllocatorLayout {
+        num_slabs,
+        free_list_elements_offset,
+        slab_shared_meta_offset,
+        slab_free_stacks_offset,
+        slabs_offset,
+    } = layout::offsets(file_size, slab_size, num_workers);
+    if num_slabs == 0 {
+        return Err(Error::InvalidFileSize);
+    }
+
+    // Create the file and mmap it.
+    if delete_existing && path.as_ref().exists() {
+        std::fs::remove_file(path.as_ref()).map_err(Error::IoError)?;
+    }
+    let file = create_file(path, file_size)?;
+    let mmap = open_mmap(&file, file_size)?;
+
+    let mut header = NonNull::new(mmap.cast::<Header>()).ok_or(Error::MMapError(0))?;
+
+    // Initialize the header.
+    {
+        // SAFETY: The header is valid for any byte pattern.
+        let header = unsafe { header.as_mut() };
+        header.num_workers = num_workers;
+        header.num_slabs = num_slabs;
+        header.slab_size = slab_size;
+        header.free_list_elements_offset = free_list_elements_offset;
+        header.slab_shared_meta_offset = slab_shared_meta_offset;
+        header.slab_free_stacks_offset = slab_free_stacks_offset;
+        header.slabs_offset = slabs_offset;
+        header
+            .global_free_list_head
+            .store(NULL_U32, Ordering::Release);
+        header.magic = crate::header::MAGIC;
+        header.version = crate::header::VERSION;
+    }
+
+    // SAFETY: The header is now initialized and valid.
+    unsafe {
+        initialize::worker_local_lists(header);
+        initialize::free_list_elements(header);
+        initialize::slab_shared_meta(header);
+    }
+
+    // SAFETY: The header is now initialized and valid.
+    unsafe { Allocator::new(header, worker_index) }
+}
+
+fn verify_slab_size(slab_size: u32) -> Result<(), Error> {
+    if !slab_size.is_power_of_two() {
+        return Err(Error::InvalidSlabSize);
+    }
+
+    if slab_size < MAX_SIZE {
+        return Err(Error::InvalidSlabSize);
+    }
+
+    if slab_size / MIN_SIZE > u16::MAX as u32 {
+        return Err(Error::InvalidSlabSize);
+    }
+
+    Ok(())
+}
+
+fn open_mmap(file: &File, size: usize) -> Result<*mut c_void, Error> {
+    let mmap = unsafe {
+        libc::mmap(
+            core::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            file.as_raw_fd(),
+            0,
+        )
+    };
+
+    if mmap == libc::MAP_FAILED {
+        return Err(Error::MMapError(mmap as usize));
+    }
+
+    Ok(mmap)
+}
+
+fn create_file(file_path: impl AsRef<Path>, size: usize) -> Result<File, Error> {
+    let file_path = file_path.as_ref();
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(file_path)
+        .map_err(Error::IoError)?;
+    file.set_len(size as u64).map_err(Error::IoError)?;
+
+    Ok(file)
+}
+
+mod initialize {
+    use super::*;
+    use crate::{
+        header::WorkerLocalListPartialFullHeads, index::NULL_U16, size_classes::NUM_SIZE_CLASSES,
+        slab_meta::SlabMeta,
+    };
+
+    /// # Safety
+    /// - `header` must be a valid pointer to an initialized `Header`
+    ///   with sufficient trailing space for an `Allocator`.
+    pub fn worker_local_lists(header: NonNull<Header>) {
+        let num_workers = {
+            // SAFETY: The header is assumed to be valid and initialized.
+            let header = unsafe { header.as_ref() };
+            header.num_workers
+        };
+
+        // SAFETY: The header is assumed to be valid and initialized.
+        let all_workers_heads = unsafe {
+            header
+                .byte_add(offset_of!(Header, worker_local_list_heads))
+                .cast::<WorkerLocalListHeads>()
+        };
+        for i in 0..num_workers {
+            let worker_head = unsafe {
+                all_workers_heads
+                    .add(i as usize)
+                    .cast::<[WorkerLocalListPartialFullHeads; NUM_SIZE_CLASSES]>()
+                    .as_mut()
+            };
+            for worker_partial_full in worker_head.iter_mut() {
+                worker_partial_full.partial = NULL_U32;
+                worker_partial_full.full = NULL_U32;
+            }
+        }
+    }
+
+    /// # Safety
+    /// - `header` must be a valid pointer to an initialized `Header`
+    ///   with sufficient trailing space for a an `Allocator`.
+    pub unsafe fn free_list_elements(header: NonNull<Header>) {
+        // SAFETY: The header is assumed to be valid and initialized.
+        let (num_slabs, free_list_elements_offset) = {
+            let header = unsafe { header.as_ref() };
+            (header.num_slabs, header.free_list_elements_offset)
+        };
+
+        // SAFETY: The header has enough trailing space for free list elements.
+        let mut free_list_element_ptr =
+            unsafe { header.byte_add(free_list_elements_offset as usize) }
+                .cast::<FreeListElement>();
+        for slab_index in 0..num_slabs {
+            let global_next = if slab_index == num_slabs - 1 {
+                NULL_U32
+            } else {
+                slab_index + 1
+            };
+
+            // SAFETY: The mmap must be large enough to hold all free list elements.
+            let free_list_element = unsafe { free_list_element_ptr.as_mut() };
+            free_list_element
+                .global_next
+                .store(global_next, Ordering::Release);
+            free_list_element
+                .worker_local_prev
+                .store(NULL_U32, Ordering::Release);
+            free_list_element
+                .worker_local_next
+                .store(NULL_U32, Ordering::Release);
+        }
+    }
+
+    pub fn slab_shared_meta(header: NonNull<Header>) {
+        let (num_slabs, slab_shared_meta_offset) = {
+            // SAFETY: The header is assumed to be valid and initialized.
+            let header = unsafe { header.as_ref() };
+            (header.num_slabs, header.slab_shared_meta_offset)
+        };
+
+        for slab_index in 0..num_slabs {
+            // SAFETY: The header has enough trailing space for slab meta.
+            let slab_meta = unsafe {
+                header
+                    .byte_add(slab_shared_meta_offset as usize)
+                    .cast::<SlabMeta>()
+                    .add(slab_index as usize)
+                    .as_mut()
+            };
+            slab_meta.assigned_worker.store(NULL_U32, Ordering::Release);
+            slab_meta.size_class_index.store(0, Ordering::Release);
+            slab_meta
+                .remote_free_stack_head
+                .store(NULL_U16, Ordering::Release);
+        }
+    }
+}
