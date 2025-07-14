@@ -2,7 +2,7 @@ use crate::cache_aligned::CacheAlignedU16;
 use crate::index::NULL_U16;
 use core::ptr::NonNull;
 use core::sync::atomic::AtomicU16;
-use std::sync::atomic::Ordering;
+use core::sync::atomic::Ordering;
 
 /// A shared remote free list for a slab.
 /// Intrusive linked list where each element is used as either a
