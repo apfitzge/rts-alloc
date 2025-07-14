@@ -1,7 +1,7 @@
 use crate::free_list_element::FreeListElement;
 use crate::free_stack::FreeStack;
 use crate::global_free_list::GlobalFreeList;
-use crate::header::{self, WorkerLocalListHeads};
+use crate::header::{self, WorkerLocalListHeads, WorkerLocalListPartialFullHeads};
 use crate::remote_free_list::RemoteFreeList;
 use crate::size_classes::size_class;
 use crate::slab_meta::SlabMeta;
@@ -56,7 +56,7 @@ impl Allocator {
     /// - The `size_index` must be a valid index for the size classes.
     unsafe fn find_allocatable_slab_index(&self, size_index: usize) -> Option<u32> {
         // SAFETY: `size_index` is guaranteed to be valid by the caller.
-        unsafe { self.worker_local_list(size_index) }
+        unsafe { self.worker_local_list_partial(size_index) }
             .head()
             .or_else(|| self.take_slab(size_index))
     }
@@ -76,13 +76,21 @@ impl Allocator {
         let free_stack = unsafe { self.slab_free_stack(slab_index) };
         let maybe_index_within_slab = free_stack.pop();
 
-        // If the slab is empty - remove it from the worker's local list.
+        // If the slab is empty - remove it from the worker's partial list,
+        // and move it to the worker's full list.
         if free_stack.is_empty() {
             // SAFETY:
             // - The `slab_index` is guaranteed to be valid by the caller.
             // - The `size_index` is guaranteed to be valid by the caller.
             unsafe {
-                self.worker_local_list(size_index).remove(slab_index);
+                self.worker_local_list_partial(size_index)
+                    .remove(slab_index);
+            }
+            // SAFETY:
+            // - The `slab_index` is guaranteed to be valid by the caller.
+            // - The `size_index` is guaranteed to be valid by the caller.
+            unsafe {
+                self.worker_local_list_full(size_index).push(slab_index);
             }
         }
 
@@ -106,7 +114,7 @@ impl Allocator {
         // SAFETY: The slab index is guaranteed to be valid by `pop`.
         unsafe { self.slab_meta(slab_index).as_ref() }.assign(self.worker_index, size_index);
         // SAFETY: The size index is guaranteed to be valid by caller.
-        let mut worker_local_list = unsafe { self.worker_local_list(size_index) };
+        let mut worker_local_list = unsafe { self.worker_local_list_partial(size_index) };
         // SAFETY: The slab index is guaranteed to be valid by `pop`.
         unsafe { worker_local_list.push(slab_index) };
         Some(slab_index)
@@ -138,10 +146,26 @@ impl Allocator {
 
     fn local_free(&self, allocation_indexes: AllocationIndexes) {
         // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
-        unsafe {
-            self.slab_free_stack(allocation_indexes.slab_index)
-                .push(allocation_indexes.index_within_slab)
+        let was_full = unsafe {
+            let free_stack = self.slab_free_stack(allocation_indexes.slab_index);
+            let was_full = free_stack.is_empty();
+            free_stack.push(allocation_indexes.index_within_slab);
+            was_full
         };
+        if was_full {
+            // Remove the slab from the worker's full list,
+            // and move it to the worker's partial list.
+            // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
+            unsafe {
+                self.worker_local_list_full(allocation_indexes.slab_index as usize)
+                    .remove(allocation_indexes.slab_index);
+            }
+            // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
+            unsafe {
+                self.worker_local_list_partial(allocation_indexes.slab_index as usize)
+                    .push(allocation_indexes.slab_index);
+            }
+        }
     }
 
     fn remote_free(&self, allocation_indexes: AllocationIndexes) {
@@ -221,11 +245,11 @@ impl Allocator {
     }
 
     /// Returns a `WorkerLocalList` for the current worker to interact with its
-    /// local free list.
+    /// local free list of partially full slabs.
     ///
     /// # Safety
     /// - The `size_index` must be a valid index for the size classes.
-    pub unsafe fn worker_local_list(&self, size_index: usize) -> WorkerLocalList {
+    pub unsafe fn worker_local_list_partial(&self, size_index: usize) -> WorkerLocalList {
         let head = {
             // SAFETY: The header is assumed to be valid and initialized.
             let all_workers_heads = unsafe {
@@ -236,7 +260,44 @@ impl Allocator {
             // SAFETY: The worker index is guaranteed to be valid by the constructor.
             let worker_heads = unsafe { all_workers_heads.add(self.worker_index as usize) };
             // SAFETY: The size index is guaranteed to be valid by the caller.
-            unsafe { worker_heads.cast::<u32>().add(size_index).as_mut() }
+            &mut unsafe {
+                worker_heads
+                    .cast::<WorkerLocalListPartialFullHeads>()
+                    .add(size_index)
+                    .as_mut()
+            }
+            .partial
+        };
+        let list = self.free_list_elements();
+        // SAFETY:
+        // - `head` is a valid reference to the worker's local list head.
+        // - `list` is guaranteed to be valid with sufficient capacity.
+        unsafe { WorkerLocalList::new(head, list) }
+    }
+
+    /// Returns a `WorkerLocalList` for the current worker to interact with its
+    /// local free list of full slabs.
+    ///
+    /// # Safety
+    /// - The `size_index` must be a valid index for the size classes.
+    pub unsafe fn worker_local_list_full(&self, size_index: usize) -> WorkerLocalList {
+        let head = {
+            // SAFETY: The header is assumed to be valid and initialized.
+            let all_workers_heads = unsafe {
+                self.header
+                    .byte_add(offset_of!(Header, worker_local_list_heads))
+                    .cast::<WorkerLocalListHeads>()
+            };
+            // SAFETY: The worker index is guaranteed to be valid by the constructor.
+            let worker_heads = unsafe { all_workers_heads.add(self.worker_index as usize) };
+            // SAFETY: The size index is guaranteed to be valid by the caller.
+            &mut unsafe {
+                worker_heads
+                    .cast::<WorkerLocalListPartialFullHeads>()
+                    .add(size_index)
+                    .as_mut()
+            }
+            .full
         };
         let list = self.free_list_elements();
         // SAFETY:

@@ -6,7 +6,11 @@ use crate::{
 pub const MAGIC: u64 = 0x727473616c6f63; // "rtsaloc"
 pub const VERSION: u32 = 1;
 
-pub type WorkerLocalListHeads = CacheAligned<[u32; NUM_SIZE_CLASSES]>;
+pub type WorkerLocalListHeads = CacheAligned<[WorkerLocalListPartialFullHeads; NUM_SIZE_CLASSES]>;
+pub struct WorkerLocalListPartialFullHeads {
+    pub partial: u32,
+    pub full: u32,
+}
 
 #[repr(C)]
 pub struct Header {
