@@ -385,7 +385,7 @@ impl Allocator {
             let header = unsafe { self.header.as_ref() };
             (header.slab_size, header.slab_free_stacks_offset)
         };
-        let free_stack_size = header::layout::free_stacks_size(slab_size);
+        let free_stack_size = header::layout::single_free_stack_size(slab_size);
 
         // SAFETY: The header is guaranteed to be valid and initialized.
         // The free stacks are laid out sequentially after the slab meta.

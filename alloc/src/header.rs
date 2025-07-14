@@ -62,30 +62,93 @@ pub mod layout {
         core::mem::size_of::<Header>()
     }
 
-    /// The size of the worker local list heads in bytes with trailing padding.
-    pub const fn padded_worker_local_list_heads_size(num_workers: u32) -> usize {
-        const FREE_LIST_ELEMENT_ALIGNMENT: usize = core::mem::align_of::<FreeListElement>();
-        let size = core::mem::size_of::<WorkerLocalListHeads>() * num_workers as usize;
-        round_to_next_alignment_of::<FREE_LIST_ELEMENT_ALIGNMENT>(size)
+    /// The size of the worker local list heads in bytes.
+    pub const fn worker_local_list_heads_size(num_workers: u32) -> usize {
+        core::mem::size_of::<WorkerLocalListHeads>() * num_workers as usize
     }
 
-    /// The size of the free list elements in bytes with trailing padding.
-    pub const fn padded_free_list_elements_size(num_slabs: u32) -> usize {
+    /// Update offset to padd for free list elements.
+    pub const fn pad_for_free_list_elements(offset: usize) -> usize {
+        const FREE_LIST_ELEMENT_ALIGNMENT: usize = core::mem::align_of::<FreeListElement>();
+        round_to_next_alignment_of::<FREE_LIST_ELEMENT_ALIGNMENT>(offset)
+    }
+
+    /// The size of the free list elements in bytes.
+    pub const fn free_list_elements_size(num_slabs: u32) -> usize {
+        core::mem::size_of::<FreeListElement>() * num_slabs as usize
+    }
+
+    /// Update offset to pad for slab shared metadata.
+    pub const fn pad_for_slab_meta(offset: usize) -> usize {
         const SLAB_META_ALIGNMENT: usize = core::mem::align_of::<SlabMeta>();
-        let size = core::mem::size_of::<FreeListElement>() * num_slabs as usize;
-        round_to_next_alignment_of::<SLAB_META_ALIGNMENT>(size)
+        round_to_next_alignment_of::<SLAB_META_ALIGNMENT>(offset)
     }
 
     /// The size of the slab meta in bytes with trailing padding.
-    pub const fn padded_slab_meta_size(num_slabs: u32) -> usize {
+    pub const fn slab_meta_size(num_slabs: u32) -> usize {
+        core::mem::size_of::<SlabMeta>() * num_slabs as usize
+    }
+
+    /// Update offset to pad for slab free stacks.
+    pub const fn pad_for_slab_free_stacks(offset: usize) -> usize {
         const FREE_STACK_ALIGNMENT: usize = core::mem::align_of::<FreeStack>();
-        let size = core::mem::size_of::<SlabMeta>() * num_slabs as usize;
-        round_to_next_alignment_of::<FREE_STACK_ALIGNMENT>(size)
+        round_to_next_alignment_of::<FREE_STACK_ALIGNMENT>(offset)
+    }
+
+    /// The size of an individual free stack in bytes.
+    pub const fn single_free_stack_size(slab_size: u32) -> usize {
+        let max_capacity = slab_size / MIN_SIZE;
+        FreeStack::byte_size(max_capacity as u16)
     }
 
     /// The size of the free stacks in bytes WITHOUT trailing padding.
-    pub const fn free_stacks_size(slab_size: u32) -> usize {
-        let max_capacity = slab_size / MIN_SIZE;
-        FreeStack::byte_size(max_capacity as u16)
+    pub const fn free_stacks_size(num_slabs: u32, slab_size: u32) -> usize {
+        single_free_stack_size(slab_size) * num_slabs as usize
+    }
+
+    /// Update offset to the next multiple of `slab_size`.
+    pub const fn pad_for_slabs(offset: usize, slab_size: u32) -> usize {
+        debug_assert!(slab_size.is_power_of_two());
+        let slab_size = slab_size as usize;
+        (offset + slab_size - 1) & !(slab_size - 1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_layout() {
+        let num_workers = 4;
+        let num_slabs = 8;
+        let slab_size = 4096;
+
+        let mut offset = layout::header_size();
+        assert_eq!(offset, core::mem::size_of::<Header>());
+
+        offset += layout::worker_local_list_heads_size(num_workers);
+        assert_eq!(offset, 384);
+
+        offset = layout::pad_for_free_list_elements(offset);
+        assert_eq!(offset, 384);
+
+        offset += layout::free_list_elements_size(num_slabs);
+        assert_eq!(offset, 480);
+
+        offset = layout::pad_for_slab_meta(offset);
+        assert_eq!(offset, 512);
+
+        offset += layout::slab_meta_size(num_slabs);
+        assert_eq!(offset, 1536);
+
+        offset = layout::pad_for_slab_free_stacks(offset);
+        assert_eq!(offset, 1536);
+
+        offset += layout::free_stacks_size(num_slabs, slab_size);
+        assert_eq!(offset, 2304);
+
+        offset = layout::pad_for_slabs(offset, slab_size);
+        assert_eq!(offset, 4096);
     }
 }
