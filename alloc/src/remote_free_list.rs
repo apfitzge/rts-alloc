@@ -1,4 +1,5 @@
 use crate::cache_aligned::CacheAlignedU16;
+use crate::index::NULL_U16;
 use core::ptr::NonNull;
 use core::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
@@ -60,6 +61,76 @@ impl<'a> RemoteFreeList<'a> {
                 // Successfully pushed the item to the remote free list.
                 break;
             }
+        }
+    }
+
+    /// Drain the remote free list and return an iterator over the items.
+    pub fn drain(&self) -> impl Iterator<Item = u16> + '_ {
+        // Swap the head to NULL_U16 to mark the list as drained.
+        let current = self.head.swap(NULL_U16, Ordering::AcqRel);
+        self.iterate_from(current)
+    }
+
+    /// Iterate over the remote free list.
+    pub fn iterate(&self) -> impl Iterator<Item = u16> + '_ {
+        // Start iterating from the head of the remote free list.
+        self.iterate_from(self.head.load(Ordering::Acquire))
+    }
+
+    /// Iterate over the remote free list starting from a given index.
+    fn iterate_from(&self, mut current: u16) -> impl Iterator<Item = u16> + '_ {
+        core::iter::from_fn(move || {
+            if current == NULL_U16 {
+                return None; // End of the list
+            }
+            let ret = Some(current);
+
+            // SAFETY: The `current` is assumed to be a valid index into the slab.
+            let item: &AtomicU16 = unsafe {
+                self.slab
+                    .byte_add(current as usize * self.slab_item_size as usize)
+                    .cast()
+                    .as_ref()
+            };
+            // Read the next item in the list.
+            current = item.load(Ordering::Acquire);
+            ret
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{cache_aligned::CacheAligned, size_classes::MIN_SIZE};
+
+    use super::*;
+
+    #[test]
+    fn test_remote_free_list() {
+        const SLAB_ITEM_SIZE: u32 = MIN_SIZE;
+        const TEST_CAPACITY: usize = 128;
+        let head = CacheAligned(AtomicU16::new(NULL_U16));
+        let mut slab_backing = vec![[0u8; SLAB_ITEM_SIZE as usize]; TEST_CAPACITY];
+        let slab = NonNull::new(slab_backing.as_mut_ptr())
+            .unwrap()
+            .cast::<u8>();
+
+        let remote_free_list = unsafe { RemoteFreeList::new(SLAB_ITEM_SIZE, &head, slab) };
+
+        // SAFETY: Pushing and iterating within bounds.
+        unsafe {
+            remote_free_list.push(7);
+            remote_free_list.push(42);
+            remote_free_list.push(63);
+            assert_eq!(remote_free_list.iterate().collect::<Vec<_>>(), [63, 42, 7]);
+
+            let drain_iter = remote_free_list.drain();
+            assert_eq!(remote_free_list.iterate().collect::<Vec<_>>(), []);
+            remote_free_list.push(99);
+            remote_free_list.push(79);
+            assert_eq!(drain_iter.collect::<Vec<_>>(), [63, 42, 7]);
+            assert_eq!(remote_free_list.iterate().collect::<Vec<_>>(), [79, 99]);
+            assert_eq!(remote_free_list.iterate().collect::<Vec<_>>(), [79, 99]);
         }
     }
 }
