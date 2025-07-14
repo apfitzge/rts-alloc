@@ -83,6 +83,41 @@ pub fn create(
     unsafe { Allocator::new(header, worker_index) }
 }
 
+/// Join an existing allocator.
+pub fn join(path: impl AsRef<Path>, worker_index: u32) -> Result<Allocator, Error> {
+    let file = open_file(path)?;
+    let file_size = file.metadata().map_err(Error::IoError)?.len() as usize;
+    let mmap = open_mmap(&file, file_size)?;
+    let header = NonNull::new(mmap.cast::<Header>()).ok_or(Error::MMapError(0))?;
+
+    // Verify header
+    {
+        // SAFETY: The header is assumed to be valid and initialized.
+        let header = unsafe { header.as_ref() };
+        if header.magic != crate::header::MAGIC || header.version != crate::header::VERSION {
+            return Err(Error::InvalidHeader);
+        }
+        verify_slab_size(header.slab_size)?;
+        if worker_index >= header.num_workers {
+            return Err(Error::InvalidWorkerIndex);
+        }
+
+        let expected_layout = layout::offsets(file_size, header.slab_size, header.num_workers);
+
+        if header.num_slabs != expected_layout.num_slabs
+            || header.free_list_elements_offset != expected_layout.free_list_elements_offset
+            || header.slab_shared_meta_offset != expected_layout.slab_shared_meta_offset
+            || header.slab_free_stacks_offset != expected_layout.slab_free_stacks_offset
+            || header.slabs_offset != expected_layout.slabs_offset
+        {
+            return Err(Error::InvalidHeader);
+        }
+    }
+
+    // SAFETY: The header is initialized and valid.
+    unsafe { Allocator::new(header, worker_index) }
+}
+
 fn verify_slab_size(slab_size: u32) -> Result<(), Error> {
     if !slab_size.is_power_of_two() {
         return Err(Error::InvalidSlabSize);
@@ -127,6 +162,17 @@ fn create_file(file_path: impl AsRef<Path>, size: usize) -> Result<File, Error> 
         .open(file_path)
         .map_err(Error::IoError)?;
     file.set_len(size as u64).map_err(Error::IoError)?;
+
+    Ok(file)
+}
+
+fn open_file(file_path: impl AsRef<Path>) -> Result<File, Error> {
+    let file_path = file_path.as_ref();
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(file_path)
+        .map_err(Error::IoError)?;
 
     Ok(file)
 }
