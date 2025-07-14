@@ -1,5 +1,5 @@
 [workspace]
-members = ["alloc", "cli", "tui"]
+members = ["alloc"]
 resolver = "2"
 
 [workspace.package]
