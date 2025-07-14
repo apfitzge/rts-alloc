@@ -3,7 +3,7 @@ use crate::free_stack::FreeStack;
 use crate::global_free_list::GlobalFreeList;
 use crate::header::{self, WorkerLocalListHeads, WorkerLocalListPartialFullHeads};
 use crate::remote_free_list::RemoteFreeList;
-use crate::size_classes::size_class;
+use crate::size_classes::{size_class, NUM_SIZE_CLASSES};
 use crate::slab_meta::SlabMeta;
 use crate::worker_local_list::WorkerLocalList;
 use crate::{error::Error, header::Header, size_classes::size_class_index};
@@ -221,6 +221,38 @@ impl Allocator {
     const unsafe fn offset_within_slab(slab_size: u32, offset_from_slab_start: u32) -> u32 {
         debug_assert!(slab_size.is_power_of_two());
         offset_from_slab_start & (slab_size - 1)
+    }
+}
+
+impl Allocator {
+    /// Frees all items in remote free lists.
+    pub fn clean_remote_free_lists(&self) {
+        // Do partial slabs before full slabs, because the act of freeing within
+        // the full slabs may move them to partial slabs list, which would lead
+        // to us double-iterating.
+        for size_index in 0..NUM_SIZE_CLASSES {
+            // SAFETY: The size index is guaranteed to be valid by the loop.
+            let worker_local_list = unsafe { self.worker_local_list_partial(size_index) };
+            self.clean_remote_free_lists_for_list(worker_local_list);
+
+            // SAFETY: The size index is guaranteed to be valid by the loop.
+            let worker_local_list = unsafe { self.worker_local_list_full(size_index) };
+            self.clean_remote_free_lists_for_list(worker_local_list);
+        }
+    }
+
+    /// Frees all items in the remote free list for the given worker local list.
+    fn clean_remote_free_lists_for_list(&self, worker_local_list: WorkerLocalList) {
+        for slab_index in worker_local_list.iterate() {
+            // SAFETY: The slab index is guaranteed to be valid by the iterator.
+            let remote_free_list = unsafe { self.remote_free_list(slab_index) };
+            for index_within_slab in remote_free_list.drain() {
+                self.local_free(AllocationIndexes {
+                    slab_index,
+                    index_within_slab,
+                })
+            }
+        }
     }
 }
 
