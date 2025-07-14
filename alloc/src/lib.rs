@@ -7,6 +7,7 @@ pub mod free_stack;
 pub mod global_free_list;
 pub mod header;
 pub mod index;
+pub mod remote_free_list;
 pub mod size_classes;
 pub mod slab_meta;
 pub mod worker_local_list;

@@ -2,6 +2,7 @@ use crate::free_list_element::FreeListElement;
 use crate::free_stack::FreeStack;
 use crate::global_free_list::GlobalFreeList;
 use crate::header::{self, WorkerLocalListHeads};
+use crate::remote_free_list::RemoteFreeList;
 use crate::size_classes::size_class;
 use crate::slab_meta::SlabMeta;
 use crate::worker_local_list::WorkerLocalList;
@@ -144,7 +145,11 @@ impl Allocator {
     }
 
     fn remote_free(&self, allocation_indexes: AllocationIndexes) {
-        todo!()
+        // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
+        unsafe {
+            self.remote_free_list(allocation_indexes.slab_index)
+                .push(allocation_indexes.index_within_slab);
+        }
     }
 
     /// Find the offset given a pointer.
@@ -238,6 +243,30 @@ impl Allocator {
         // - `head` is a valid reference to the worker's local list head.
         // - `list` is guaranteed to be valid with sufficient capacity.
         unsafe { WorkerLocalList::new(head, list) }
+    }
+
+    /// Returns an instance of `RemoteFreeList` for the given slab.
+    ///
+    /// # Safety
+    /// - `slab_index` must be a valid slab index.
+    pub unsafe fn remote_free_list(&self, slab_index: u32) -> RemoteFreeList {
+        let (head, slab_item_size) = {
+            // SAFETY: The slab index is guaranteed to be valid by the caller.
+            let slab_meta = unsafe { self.slab_meta(slab_index).as_ref() };
+            // SAFETY: The slab meta is guaranteed to be valid by the caller.
+            let size_class =
+                unsafe { size_class(slab_meta.size_class_index.load(Ordering::Acquire)) };
+            (&slab_meta.remote_free_stack_head, size_class)
+        };
+        // SAFETY: The slab index is guaranteed to be valid by the caller.
+        let slab = unsafe { self.slab(slab_index) };
+
+        // SAFETY:
+        // - `slab_item_size` must be a valid size AND currently assigned to the slab.
+        // - `head` must be a valid reference to a `CacheAlignedU16
+        //   that is the head of the remote free list.
+        // - `slab` must be a valid pointer to the beginning of the slab.
+        unsafe { RemoteFreeList::new(slab_item_size, head, slab) }
     }
 
     /// Returns a pointer to the slab meta for the given slab index.

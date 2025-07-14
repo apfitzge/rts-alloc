@@ -1,11 +1,11 @@
-use crate::{cache_aligned::CacheAlignedU32, index::NULL_U32};
+use crate::{cache_aligned::CacheAlignedU16, index::NULL_U16};
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 #[repr(C)]
 pub struct SlabMeta {
     pub assigned_worker: AtomicU32,
     pub size_class_index: AtomicUsize,
-    pub remote_free_stack_head: CacheAlignedU32,
+    pub remote_free_stack_head: CacheAlignedU16,
 }
 
 impl SlabMeta {
@@ -14,6 +14,6 @@ impl SlabMeta {
         self.size_class_index
             .store(size_class_index, Ordering::Release);
         self.remote_free_stack_head
-            .store(NULL_U32, Ordering::Release);
+            .store(NULL_U16, Ordering::Release);
     }
 }
