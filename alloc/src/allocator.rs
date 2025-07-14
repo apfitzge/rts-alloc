@@ -8,6 +8,7 @@ use crate::worker_local_list::WorkerLocalList;
 use crate::{error::Error, header::Header, size_classes::size_class_index};
 use core::mem::offset_of;
 use core::ptr::NonNull;
+use core::sync::atomic::Ordering;
 
 pub struct Allocator {
     header: NonNull<Header>,
@@ -29,7 +30,9 @@ impl Allocator {
             worker_index,
         })
     }
+}
 
+impl Allocator {
     /// Allocates a block of memory of the given size.
     /// If the size is larger than the maximum size class, returns `None`.
     /// If the allocation fails, returns `None`.
@@ -110,6 +113,89 @@ impl Allocator {
 }
 
 impl Allocator {
+    /// Free a block of memory previously allocated by this allocator.
+    ///
+    /// # Safety
+    /// - The `ptr` must be a valid pointer to a block of memory allocated by this allocator.
+    /// - The `ptr` must not have been freed before.
+    pub unsafe fn free(&self, ptr: NonNull<u8>) {
+        // SAFETY: The pointer is assumed to be valid and allocated by this allocator.
+        let offset = unsafe { self.offset(ptr) };
+        let allocation_indexes = self.find_allocation_indexes(offset);
+
+        // Check if the slab is assigned to this worker.
+        if self.worker_index
+            == unsafe { self.slab_meta(allocation_indexes.slab_index).as_ref() }
+                .assigned_worker
+                .load(Ordering::Acquire)
+        {
+            self.local_free(allocation_indexes);
+        } else {
+            self.remote_free(allocation_indexes);
+        }
+    }
+
+    fn local_free(&self, allocation_indexes: AllocationIndexes) {
+        // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
+        unsafe {
+            self.slab_free_stack(allocation_indexes.slab_index)
+                .push(allocation_indexes.index_within_slab)
+        };
+    }
+
+    fn remote_free(&self, allocation_indexes: AllocationIndexes) {
+        todo!()
+    }
+
+    /// Find the offset given a pointer.
+    ///
+    /// # Safety
+    /// - The `ptr` must be a valid pointer in the allocator's address space.
+    unsafe fn offset(&self, ptr: NonNull<u8>) -> u32 {
+        ptr.byte_offset_from_unsigned(self.header) as u32
+    }
+
+    /// Find the slab index and index within the slab for a given offset.
+    fn find_allocation_indexes(&self, offset: u32) -> AllocationIndexes {
+        let (slab_index, offset_within_slab) = {
+            // SAFETY: The header is assumed to be valid and initialized.
+            let header = unsafe { self.header.as_ref() };
+            debug_assert!(offset >= header.slabs_offset);
+            let offset_from_slab_start = header.slabs_offset.wrapping_sub(offset);
+            (
+                offset_from_slab_start / header.slab_size,
+                // SAFETY: The slab size is guaranteed to be a power of 2, for a valid header.
+                unsafe { Self::offset_within_slab(header.slab_size, offset_from_slab_start) },
+            )
+        };
+
+        let index_within_slab = {
+            // SAFETY: The slab index is guaranteed to be valid by the above calculations.
+            let size_class_index = unsafe { self.slab_meta(slab_index).as_ref() }
+                .size_class_index
+                .load(Ordering::Acquire);
+            // SAFETY: The size class index is guaranteed to be valid by valid slab meta.
+            let size_class = unsafe { size_class(size_class_index) };
+            (offset_within_slab / size_class) as u16
+        };
+
+        AllocationIndexes {
+            slab_index,
+            index_within_slab,
+        }
+    }
+
+    /// Return offset within a slab.
+    ///
+    /// # Safety
+    /// - The `slab_size` must be a power of 2.
+    const unsafe fn offset_within_slab(slab_size: u32, offset_from_slab_start: u32) -> u32 {
+        debug_assert!(slab_size.is_power_of_two());
+        offset_from_slab_start & (slab_size - 1)
+    }
+}
+
+impl Allocator {
     /// Returns a pointer to the free list elements in allocator.
     pub fn free_list_elements(&self) -> NonNull<FreeListElement> {
         // SAFETY: The header is assumed to be valid and initialized.
@@ -167,7 +253,7 @@ impl Allocator {
         unsafe { slab_metas.add(slab_index as usize) }
     }
 
-    /// Return a reference to a free stack for the given slab index.
+    /// Return a mutable reference to a free stack for the given slab index.
     ///
     /// # Safety
     /// - The `slab_index` must be a valid index for the slabs.
@@ -207,4 +293,9 @@ impl Allocator {
                 .cast()
         }
     }
+}
+
+struct AllocationIndexes {
+    slab_index: u32,
+    index_within_slab: u16,
 }

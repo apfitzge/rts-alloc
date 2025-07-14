@@ -1,5 +1,6 @@
 use crate::cache_aligned::CacheAlignedU16;
-use std::sync::atomic::Ordering;
+use core::ptr::NonNull;
+use core::sync::atomic::{AtomicU16, Ordering};
 
 /// A lock-free stack that allows pushing and popping of indices.
 ///
@@ -12,7 +13,7 @@ pub struct FreeStack {
     /// The current number of items in the stack - i.e. the top index.
     top: CacheAlignedU16,
     /// Trailing array of `u16` indices.
-    stack: [u16; 0],
+    stack: [AtomicU16; 0],
 }
 
 impl FreeStack {
@@ -26,12 +27,15 @@ impl FreeStack {
     /// # Safety
     /// - The trailing `stack` must be initialized correctly, with space for
     ///   at least `capacity` items.
-    pub unsafe fn reset(&mut self, capacity: u16) {
+    pub unsafe fn reset(&self, capacity: u16) {
         self.top.store(capacity, Ordering::Relaxed);
         // Initialize the stack in reverse sequential order.
-        let stack = self.stack.as_mut_ptr();
+        let stack = self.stack();
         for index in 0..capacity {
-            stack.add(usize::from(index)).write(capacity - index - 1);
+            stack
+                .add(usize::from(index))
+                .as_ref()
+                .store(capacity - index - 1, Ordering::Relaxed);
         }
     }
 
@@ -52,7 +56,12 @@ impl FreeStack {
 
         // Read the value at the top of the stack.
         // Safety: The trailing stack is initialized correctly.
-        let popped_value = unsafe { self.stack.as_ptr().add(usize::from(new_top)).read() };
+        let popped_value = unsafe {
+            self.stack()
+                .add(usize::from(new_top))
+                .as_ref()
+                .load(Ordering::Relaxed)
+        };
 
         // Update the top of the stack.
         self.top.store(new_top, Ordering::Relaxed);
@@ -66,9 +75,12 @@ impl FreeStack {
     /// - The trailing `stack` must be initialized correctly.
     /// - The item must be a valid index into the stack.
     /// - The stack must not be full.
-    pub unsafe fn push(&mut self, item: u16) {
+    pub unsafe fn push(&self, item: u16) {
         let top = self.top.load(Ordering::Relaxed);
-        self.stack.as_mut_ptr().add(usize::from(top)).write(item);
+        self.stack()
+            .add(usize::from(top))
+            .as_ref()
+            .store(item, Ordering::Relaxed);
         self.top.store(top + 1, Ordering::Relaxed);
     }
 
@@ -88,7 +100,15 @@ impl FreeStack {
     /// - The index must be less than the current length of the stack.
     /// - Trailing memory must have been initialized correctly.
     pub unsafe fn get(&self, index: u16) -> u16 {
-        self.stack.as_ptr().add(usize::from(index)).read()
+        self.stack()
+            .add(usize::from(index))
+            .as_ref()
+            .load(Ordering::Relaxed)
+    }
+
+    fn stack(&self) -> NonNull<AtomicU16> {
+        // SAFETY: The stack is guaranteed to be non-empty and properly initialized.
+        unsafe { NonNull::new_unchecked(self.stack.as_ptr().cast_mut()) }
     }
 }
 
