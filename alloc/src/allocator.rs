@@ -646,4 +646,21 @@ mod tests {
         // Both slabs should now be empty and moved to the global free list.
         check_worker_list_expectations(&allocator, size_index, false, false);
     }
+
+    #[test]
+    fn test_out_of_slabs() {
+        let mut buffer = vec![0u8; TEST_BUFFER_SIZE];
+        let slab_size = 65536; // 64 KiB
+        let num_workers = 4;
+        let worker_index = 0;
+        let allocator = initialize_for_test(&mut buffer, slab_size, num_workers, worker_index);
+
+        let num_slabs = unsafe { allocator.header.as_ref() }.num_slabs;
+        for index in 0..num_slabs {
+            let slab_index = unsafe { allocator.take_slab(0) }.unwrap();
+            assert_eq!(slab_index, index);
+        }
+        // The next slab allocation should fail, as all slabs are taken.
+        assert!(unsafe { allocator.take_slab(0) }.is_none());
+    }
 }
