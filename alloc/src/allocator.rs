@@ -520,6 +520,12 @@ mod tests {
         unsafe { Allocator::new(header, worker_index) }.unwrap()
     }
 
+    fn join_for_tests(buffer: &mut [u8], worker_index: u32) -> Allocator {
+        let header = NonNull::new(buffer.as_mut_ptr() as *mut Header).unwrap();
+        // SAFETY: The header is valid if joining an existing allocator.
+        unsafe { Allocator::new(header, worker_index) }.unwrap()
+    }
+
     #[test]
     fn test_allocator() {
         let mut buffer = vec![0u8; TEST_BUFFER_SIZE];
@@ -662,5 +668,61 @@ mod tests {
         }
         // The next slab allocation should fail, as all slabs are taken.
         assert!(unsafe { allocator.take_slab(0) }.is_none());
+    }
+
+    #[test]
+    fn test_remote_free_lists() {
+        let mut buffer = vec![0u8; TEST_BUFFER_SIZE];
+        let slab_size = 65536; // 64 KiB
+        let num_workers = 4;
+
+        let allocator_0 = initialize_for_test(&mut buffer, slab_size, num_workers, 0);
+        let allocator_1 = join_for_tests(&mut buffer, 1);
+
+        let allocation_size = 2048;
+        let size_index = size_class_index(allocation_size).unwrap();
+        let allocations_per_slab = slab_size / allocation_size;
+
+        // Allocate enough to fill the first slab.
+        let mut allocations = vec![];
+        for _ in 0..allocations_per_slab {
+            allocations.push(allocator_0.allocate(allocation_size).unwrap());
+        }
+
+        // The first slab should be full.
+        let slab_index = unsafe {
+            let worker_local_list = allocator_0.worker_local_list_partial(size_index);
+            assert!(worker_local_list.head().is_none());
+            let worker_local_list = allocator_0.worker_local_list_full(size_index);
+            assert!(worker_local_list.head().is_some());
+            worker_local_list.head().unwrap()
+        };
+
+        // The slab's remote list should be empty.
+        let remote_free_list = unsafe { allocator_0.remote_free_list(slab_index) };
+        assert!(remote_free_list.iterate().next().is_none());
+
+        // Free the allocations to the remote free list.
+        for ptr in allocations {
+            unsafe {
+                allocator_1.free(ptr);
+            }
+        }
+
+        // Allocator 0 can NOT allocate in the same slab.
+        let different_slab_allocation = allocator_0.allocate(allocation_size).unwrap();
+        let allocation_indexes = unsafe {
+            allocator_0.find_allocation_indexes(allocator_0.offset(different_slab_allocation))
+        };
+        assert_ne!(allocation_indexes.slab_index, slab_index);
+        unsafe { allocator_0.free(different_slab_allocation) };
+
+        // If we clean the remote free lists, the next allocation should succeed in the same slab.
+        allocator_0.clean_remote_free_lists();
+        let same_slab_allocation = allocator_0.allocate(allocation_size).unwrap();
+        let allocation_indexes = unsafe {
+            allocator_0.find_allocation_indexes(allocator_0.offset(same_slab_allocation))
+        };
+        assert_eq!(allocation_indexes.slab_index, slab_index);
     }
 }
