@@ -2,14 +2,15 @@ use crate::{
     cache_aligned::{CacheAligned, CacheAlignedU32},
     size_classes::NUM_SIZE_CLASSES,
 };
+use core::sync::atomic::AtomicU32;
 
 pub const MAGIC: u64 = 0x727473616c6f63; // "rtsaloc"
 pub const VERSION: u32 = 1;
 
 pub type WorkerLocalListHeads = CacheAligned<[WorkerLocalListPartialFullHeads; NUM_SIZE_CLASSES]>;
 pub struct WorkerLocalListPartialFullHeads {
-    pub partial: u32,
-    pub full: u32,
+    pub partial: AtomicU32,
+    pub full: AtomicU32,
 }
 
 #[repr(C)]
@@ -56,7 +57,7 @@ pub mod layout {
         size_classes::MIN_SIZE,
         slab_meta::SlabMeta,
     };
-
+    #[derive(Debug)]
     pub struct AllocatorLayout {
         /// The number of slabs in the allocator.
         pub num_slabs: u32,
@@ -76,15 +77,19 @@ pub mod layout {
         offset = pad_for_free_list_elements(offset);
         let free_list_elements_offset = offset as u32;
 
-        offset += free_list_elements_size(num_workers);
+        // Get an upperbound on number of slabs:
+        // At least 1 slab slot is taken for the header and meta information.
+        let num_slabs_upperbound = ((file_size / slab_size as usize) - 1) as u32;
+
+        offset += free_list_elements_size(num_slabs_upperbound);
         offset = pad_for_slab_meta(offset);
         let slab_shared_meta_offset = offset as u32;
 
-        offset += slab_meta_size(num_workers);
+        offset += slab_meta_size(num_slabs_upperbound);
         offset = pad_for_slab_free_stacks(offset);
         let slab_free_stacks_offset = offset as u32;
 
-        offset += free_stacks_size(num_workers, slab_size);
+        offset += free_stacks_size(num_slabs_upperbound, slab_size);
         offset = pad_for_slabs(offset, slab_size);
         let slabs_offset = offset as u32;
 

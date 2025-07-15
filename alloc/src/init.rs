@@ -147,7 +147,7 @@ fn open_file(file_path: impl AsRef<Path>) -> Result<File, Error> {
 pub mod initialize {
     use super::*;
     use crate::{
-        header::WorkerLocalListPartialFullHeads, index::NULL_U16, size_classes::NUM_SIZE_CLASSES,
+        header::WorkerLocalListPartialFullHeads, size_classes::NUM_SIZE_CLASSES,
         slab_meta::SlabMeta,
     };
 
@@ -224,9 +224,12 @@ pub mod initialize {
                     .cast::<[WorkerLocalListPartialFullHeads; NUM_SIZE_CLASSES]>()
                     .as_mut()
             };
+
             for worker_partial_full in worker_head.iter_mut() {
-                worker_partial_full.partial = NULL_U32;
-                worker_partial_full.full = NULL_U32;
+                worker_partial_full
+                    .partial
+                    .store(NULL_U32, Ordering::Release);
+                worker_partial_full.full.store(NULL_U32, Ordering::Release);
             }
         }
     }
@@ -242,9 +245,9 @@ pub mod initialize {
         };
 
         // SAFETY: The header has enough trailing space for free list elements.
-        let mut free_list_element_ptr =
-            unsafe { header.byte_add(free_list_elements_offset as usize) }
-                .cast::<FreeListElement>();
+        let free_list_element_ptr = unsafe { header.byte_add(free_list_elements_offset as usize) }
+            .cast::<FreeListElement>();
+
         for slab_index in 0..num_slabs {
             let global_next = if slab_index == num_slabs - 1 {
                 NULL_U32
@@ -253,7 +256,8 @@ pub mod initialize {
             };
 
             // SAFETY: The mmap must be large enough to hold all free list elements.
-            let free_list_element = unsafe { free_list_element_ptr.as_mut() };
+            let free_list_element =
+                unsafe { free_list_element_ptr.add(slab_index as usize).as_mut() };
             free_list_element
                 .global_next
                 .store(global_next, Ordering::Release);
@@ -264,6 +268,12 @@ pub mod initialize {
                 .worker_local_next
                 .store(NULL_U32, Ordering::Release);
         }
+
+        // Now that the list has been initialized, set the global free list head.
+        // SAFETY: The header is assumed to be valid and initialized.
+        unsafe { header.as_ref() }
+            .global_free_list_head
+            .store(0, Ordering::Release);
     }
 
     fn slab_shared_meta(header: NonNull<Header>) {
@@ -282,11 +292,7 @@ pub mod initialize {
                     .add(slab_index as usize)
                     .as_mut()
             };
-            slab_meta.assigned_worker.store(NULL_U32, Ordering::Release);
-            slab_meta.size_class_index.store(0, Ordering::Release);
-            slab_meta
-                .remote_free_stack_head
-                .store(NULL_U16, Ordering::Release);
+            slab_meta.assign(NULL_U32, 0);
         }
     }
 }

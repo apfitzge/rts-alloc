@@ -23,25 +23,6 @@ impl<'a> GlobalFreeList<'a> {
         GlobalFreeList { head, list }
     }
 
-    /// Clears the head of the global free list.
-    pub fn clear_head(&self) {
-        self.head.store(NULL_U32, Ordering::Release);
-    }
-
-    /// Initializes the global free list as full with given `capacity`.
-    ///
-    /// # Safety
-    /// - `capacity` must be a valid size for the `list`.
-    pub unsafe fn init_full(&self, capacity: u32) {
-        self.clear_head();
-        for slab_index in (0..capacity).rev() {
-            // SAFETY: The `slab_index` is a valid index into the `list`.
-            unsafe {
-                self.push(slab_index);
-            }
-        }
-    }
-
     /// Pushes `slab_index` onto the head of the global free list.
     ///
     /// # Safety
@@ -103,7 +84,7 @@ impl<'a> GlobalFreeList<'a> {
     ///
     /// # Safety
     /// - The `slab_index` must be a valid index into the `list`.
-    unsafe fn get_unchecked(&self, slab_index: u32) -> &FreeListElement {
+    pub unsafe fn get_unchecked(&self, slab_index: u32) -> &FreeListElement {
         self.list.add(slab_index as usize).as_ref()
     }
 }

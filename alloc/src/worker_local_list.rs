@@ -1,12 +1,12 @@
 use crate::{free_list_element::FreeListElement, index::NULL_U32};
 use core::ptr::NonNull;
-use std::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 /// A doubly linked-list that tracks slabs assigned to a worker.
 /// This list is not safe to use concurrently across processes,
 /// and should only be accessed by the associated worker.
 pub struct WorkerLocalList<'a> {
-    head: &'a mut u32,
+    head: &'a AtomicU32,
     list: NonNull<FreeListElement>,
 }
 
@@ -16,14 +16,15 @@ impl<'a> WorkerLocalList<'a> {
     /// # Safety
     /// - `head` must be a valid index into the `list` or NULL_U32.
     /// - `list` must be a valid pointer to an array of `FreeListElement` with sufficient capacity.
-    pub unsafe fn new(head: &'a mut u32, list: NonNull<FreeListElement>) -> Self {
+    pub unsafe fn new(head: &'a AtomicU32, list: NonNull<FreeListElement>) -> Self {
         Self { head, list }
     }
 
     /// Returns the head of the worker local list.
     pub fn head(&self) -> Option<u32> {
-        if *self.head != NULL_U32 {
-            Some(*self.head)
+        let head = self.head.load(Ordering::Acquire);
+        if head != NULL_U32 {
+            Some(head)
         } else {
             None
         }
@@ -33,7 +34,7 @@ impl<'a> WorkerLocalList<'a> {
     /// # Safety
     /// - `capacity` must be a valid size for the `list`.
     pub unsafe fn initialize_as_empty(&mut self, capacity: u32) {
-        *self.head = NULL_U32;
+        self.head.store(NULL_U32, Ordering::Release);
         for slab_index in 0..capacity {
             // SAFETY: The `slab_index` is a valid index into the `list
             unsafe {
@@ -49,7 +50,7 @@ impl<'a> WorkerLocalList<'a> {
     /// # Safety
     /// - `slab_index` must be a valid index into the `list`.
     pub unsafe fn push(&mut self, slab_index: u32) {
-        let current_head = *self.head;
+        let current_head = self.head.load(Ordering::Acquire);
 
         {
             // SAFETY: The `slab_index` is assumed to be a valid index into the `list`.
@@ -70,7 +71,7 @@ impl<'a> WorkerLocalList<'a> {
                 .store(slab_index, Ordering::Release);
         }
 
-        *self.head = slab_index;
+        self.head.store(slab_index, Ordering::Release);
     }
 
     /// Remove a slab from the list.
@@ -98,7 +99,7 @@ impl<'a> WorkerLocalList<'a> {
             prev_node.worker_local_next.store(next, Ordering::Release);
         } else {
             // If there is no previous node, we are at the head.
-            *self.head = next;
+            self.head.store(next, Ordering::Release);
         };
 
         if next != NULL_U32 {
@@ -110,7 +111,7 @@ impl<'a> WorkerLocalList<'a> {
 
     /// Iterates over the worker local list.
     pub fn iterate(&self) -> impl Iterator<Item = u32> + '_ {
-        let mut current_head = *self.head;
+        let mut current_head = self.head.load(Ordering::Acquire);
         core::iter::from_fn(move || {
             if current_head == NULL_U32 {
                 return None; // End of the list
@@ -141,7 +142,7 @@ mod tests {
     #[test]
     fn test_worker_local_list() {
         const LIST_CAPACITY: u32 = 1024;
-        let mut head = NULL_U32;
+        let head = AtomicU32::new(NULL_U32);
         let mut buffer = (0..LIST_CAPACITY)
             .map(|_| FreeListElement {
                 global_next: AtomicU32::new(NULL_U32),
@@ -150,7 +151,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut worker_local_list =
-            unsafe { WorkerLocalList::new(&mut head, NonNull::new(buffer.as_mut_ptr()).unwrap()) };
+            unsafe { WorkerLocalList::new(&head, NonNull::new(buffer.as_mut_ptr()).unwrap()) };
 
         // Test removal orders:
         // - [head, head, head]

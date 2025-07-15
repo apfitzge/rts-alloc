@@ -144,6 +144,7 @@ impl Allocator {
     /// - The `size_index` must be a valid index for the size claasses.
     unsafe fn take_slab(&self, size_index: usize) -> Option<u32> {
         let slab_index = self.global_free_list().pop()?;
+
         // SAFETY: The slab index is guaranteed to be valid by `pop`.
         unsafe { self.slab_meta(slab_index).as_ref() }.assign(self.worker_index, size_index);
         // SAFETY:
@@ -258,12 +259,15 @@ impl Allocator {
             // SAFETY: The header is assumed to be valid and initialized.
             let header = unsafe { self.header.as_ref() };
             debug_assert!(offset >= header.slabs_offset);
-            let offset_from_slab_start = header.slabs_offset.wrapping_sub(offset);
-            (
-                offset_from_slab_start / header.slab_size,
-                // SAFETY: The slab size is guaranteed to be a power of 2, for a valid header.
-                unsafe { Self::offset_within_slab(header.slab_size, offset_from_slab_start) },
-            )
+            let offset_from_slab_start = offset.wrapping_sub(header.slabs_offset);
+            let slab_index = offset_from_slab_start / header.slab_size;
+            debug_assert!(slab_index < header.num_slabs, "slab index out of bounds");
+
+            // SAFETY: The slab size is guaranteed to be a power of 2, for a valid header.
+            let offset_within_slab =
+                unsafe { Self::offset_within_slab(header.slab_size, offset_from_slab_start) };
+
+            (slab_index, offset_within_slab)
         };
 
         let index_within_slab = {
@@ -499,7 +503,7 @@ mod tests {
         size_classes::{MAX_SIZE, SIZE_CLASSES},
     };
 
-    const TEST_BUFFER_SIZE: usize = 1024 * 1024; // 1 MiB
+    const TEST_BUFFER_SIZE: usize = 64 * 1024 * 1024; // 1 MiB
 
     fn initialize_for_test(
         buffer: &mut [u8],
@@ -525,7 +529,7 @@ mod tests {
     #[test]
     fn test_allocator() {
         let mut buffer = vec![0u8; TEST_BUFFER_SIZE];
-        let slab_size = 4096; // 4 KiB
+        let slab_size = 65536; // 64 KiB
         let num_workers = 4;
         let worker_index = 0;
         let allocator = initialize_for_test(&mut buffer, slab_size, num_workers, worker_index);
@@ -534,7 +538,6 @@ mod tests {
 
         for size_class in SIZE_CLASSES[..NUM_SIZE_CLASSES - 1].iter() {
             for size in [size_class - 1, *size_class, size_class + 1] {
-                println!("Allocating size: {}", size);
                 allocations.push(allocator.allocate(size).unwrap());
             }
         }
@@ -561,7 +564,7 @@ mod tests {
         for size_index in 0..NUM_SIZE_CLASSES {
             // SAFETY: The size index is guaranteed to be valid by the loop.
             let worker_local_list = unsafe { allocator.worker_local_list_partial(size_index) };
-            assert!(worker_local_list.head().is_none());
+            assert_eq!(worker_local_list.head(), None);
         }
     }
 }
