@@ -204,25 +204,31 @@ impl Allocator {
                 unreachable!("slab can only contain one allocation - this is not allowed");
             }
             (true, false) => {
+                let size_index = unsafe { self.slab_meta(allocation_indexes.slab_index).as_ref() }
+                    .size_class_index
+                    .load(Ordering::Relaxed);
                 // The slab was full and is now partially full. It must be moved
                 // from the worker's full list to the worker's partial list.
                 // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
                 unsafe {
-                    self.worker_local_list_full(allocation_indexes.slab_index as usize)
+                    self.worker_local_list_full(size_index)
                         .remove(allocation_indexes.slab_index);
                 }
                 // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
                 unsafe {
-                    self.worker_local_list_partial(allocation_indexes.slab_index as usize)
+                    self.worker_local_list_partial(size_index)
                         .push(allocation_indexes.slab_index);
                 }
             }
             (false, true) => {
+                let size_index = unsafe { self.slab_meta(allocation_indexes.slab_index).as_ref() }
+                    .size_class_index
+                    .load(Ordering::Relaxed);
                 // The slab was partially full and is now empty.
                 // It must be moved from the worker's partial list to the global free list.
                 // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
                 unsafe {
-                    self.worker_local_list_partial(allocation_indexes.slab_index as usize)
+                    self.worker_local_list_partial(size_index)
                         .remove(allocation_indexes.slab_index);
                 }
                 // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
@@ -354,25 +360,9 @@ impl Allocator {
     /// # Safety
     /// - The `size_index` must be a valid index for the size classes.
     pub unsafe fn worker_local_list_partial(&self, size_index: usize) -> WorkerLocalList {
-        let head = {
-            // SAFETY: The header is assumed to be valid and initialized.
-            let all_workers_heads = unsafe {
-                self.header
-                    .byte_add(offset_of!(Header, worker_local_list_heads))
-                    .cast::<WorkerLocalListHeads>()
-            };
-            // SAFETY: The worker index is guaranteed to be valid by the constructor.
-            let worker_heads = unsafe { all_workers_heads.add(self.worker_index as usize) };
-            // SAFETY: The size index is guaranteed to be valid by the caller.
-            &mut unsafe {
-                worker_heads
-                    .cast::<WorkerLocalListPartialFullHeads>()
-                    .add(size_index)
-                    .as_mut()
-            }
-            .partial
-        };
+        let head = &self.worker_head(size_index).partial;
         let list = self.free_list_elements();
+
         // SAFETY:
         // - `head` is a valid reference to the worker's local list head.
         // - `list` is guaranteed to be valid with sufficient capacity.
@@ -385,29 +375,33 @@ impl Allocator {
     /// # Safety
     /// - The `size_index` must be a valid index for the size classes.
     pub unsafe fn worker_local_list_full(&self, size_index: usize) -> WorkerLocalList {
-        let head = {
-            // SAFETY: The header is assumed to be valid and initialized.
-            let all_workers_heads = unsafe {
-                self.header
-                    .byte_add(offset_of!(Header, worker_local_list_heads))
-                    .cast::<WorkerLocalListHeads>()
-            };
-            // SAFETY: The worker index is guaranteed to be valid by the constructor.
-            let worker_heads = unsafe { all_workers_heads.add(self.worker_index as usize) };
-            // SAFETY: The size index is guaranteed to be valid by the caller.
-            &mut unsafe {
-                worker_heads
-                    .cast::<WorkerLocalListPartialFullHeads>()
-                    .add(size_index)
-                    .as_mut()
-            }
-            .full
-        };
+        let head = &self.worker_head(size_index).full;
         let list = self.free_list_elements();
+
         // SAFETY:
         // - `head` is a valid reference to the worker's local list head.
         // - `list` is guaranteed to be valid with sufficient capacity.
         unsafe { WorkerLocalList::new(head, list) }
+    }
+
+    fn worker_head(&self, size_index: usize) -> &WorkerLocalListPartialFullHeads {
+        // SAFETY: The header is assumed to be valid and initialized.
+        let all_workers_heads = unsafe {
+            self.header
+                .byte_add(offset_of!(Header, worker_local_list_heads))
+                .cast::<WorkerLocalListHeads>()
+        };
+        // SAFETY: The worker index is guaranteed to be valid by the constructor.
+        let worker_heads = unsafe { all_workers_heads.add(self.worker_index as usize) };
+        // SAFETY: The size index is guaranteed to be valid by the caller.
+        let worker_head = unsafe {
+            worker_heads
+                .cast::<WorkerLocalListPartialFullHeads>()
+                .add(size_index)
+                .as_ref()
+        };
+
+        worker_head
     }
 
     /// Returns an instance of `RemoteFreeList` for the given slab.
@@ -566,5 +560,90 @@ mod tests {
             let worker_local_list = unsafe { allocator.worker_local_list_partial(size_index) };
             assert_eq!(worker_local_list.head(), None);
         }
+    }
+
+    #[test]
+    fn test_slab_list_transitions() {
+        let mut buffer = vec![0u8; TEST_BUFFER_SIZE];
+        let slab_size = 65536; // 64 KiB
+        let num_workers = 4;
+        let worker_index = 0;
+        let allocator = initialize_for_test(&mut buffer, slab_size, num_workers, worker_index);
+
+        let allocation_size = 2048;
+        let size_index = size_class_index(allocation_size).unwrap();
+        let allocations_per_slab = slab_size / allocation_size;
+
+        fn check_worker_list_expectations(
+            allocator: &Allocator,
+            size_index: usize,
+            expect_partial: bool,
+            expect_full: bool,
+        ) {
+            unsafe {
+                let partial_list = allocator.worker_local_list_partial(size_index);
+                assert_eq!(
+                    partial_list.head().is_some(),
+                    expect_partial,
+                    "{:?}",
+                    partial_list.head()
+                );
+
+                let full_list = allocator.worker_local_list_full(size_index);
+                assert_eq!(
+                    full_list.head().is_some(),
+                    expect_full,
+                    "{:?}",
+                    full_list.head()
+                );
+            }
+        }
+
+        // The parital list and full list should begin empty.
+        check_worker_list_expectations(&allocator, size_index, false, false);
+
+        let mut first_slab_allocations = vec![];
+        for _ in 0..allocations_per_slab - 1 {
+            first_slab_allocations.push(allocator.allocate(allocation_size).unwrap());
+        }
+
+        // The first slab should be partially full and the full list empty.
+        check_worker_list_expectations(&allocator, size_index, true, false);
+
+        // Allocate one more to fill the slab.
+        first_slab_allocations.push(allocator.allocate(allocation_size).unwrap());
+
+        // The first slab should now be full and moved to the full list.
+        check_worker_list_expectations(&allocator, size_index, false, true);
+
+        // Allocating again will give a new slab, which will be partially full.
+        let second_slab_allocation = allocator.allocate(allocation_size).unwrap();
+
+        // The second slab should be partially full and the first slab in the full list.
+        check_worker_list_expectations(&allocator, size_index, true, true);
+
+        let mut first_slab_allocations = first_slab_allocations.drain(..);
+        unsafe {
+            allocator.free(first_slab_allocations.next().unwrap());
+        }
+        // Both slabs should be partially full, and none are full.
+        check_worker_list_expectations(&allocator, size_index, true, false);
+
+        // Free the first slab allocation.
+        for ptr in first_slab_allocations {
+            unsafe {
+                allocator.free(ptr);
+            }
+        }
+        // The first slab is now empty and should be moved to the global free list,
+        // but the second slab is still partially full.
+        check_worker_list_expectations(&allocator, size_index, true, false);
+
+        // Free the second slab allocation.
+        unsafe {
+            allocator.free(second_slab_allocation);
+        }
+        // Both slabs should now be empty and moved to the global free list.
+        check_worker_list_expectations(&allocator, size_index, false, false);
     }
 }
