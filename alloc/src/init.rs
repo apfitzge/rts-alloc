@@ -29,14 +29,8 @@ pub fn create(
     verify_slab_size(slab_size)?;
 
     // Given parameters, calculate layout.
-    let AllocatorLayout {
-        num_slabs,
-        free_list_elements_offset,
-        slab_shared_meta_offset,
-        slab_free_stacks_offset,
-        slabs_offset,
-    } = layout::offsets(file_size, slab_size, num_workers);
-    if num_slabs == 0 {
+    let layout = layout::offsets(file_size, slab_size, num_workers);
+    if layout.num_slabs == 0 {
         return Err(Error::InvalidFileSize);
     }
 
@@ -50,26 +44,10 @@ pub fn create(
     let header = NonNull::new(mmap.cast::<Header>()).ok_or(Error::MMapError(0))?;
 
     // Initialize the header.
-    // SAFETY: The header is valid for any byte pattern, and we are initializing it.
+    // SAFETY: The header is valid for any byte pattern.
     //         There is sufficient space for a `Header` and trailing data.
     unsafe {
-        initialize::header(
-            header,
-            num_workers,
-            num_slabs,
-            slab_size,
-            free_list_elements_offset,
-            slab_shared_meta_offset,
-            slab_free_stacks_offset,
-            slabs_offset,
-        );
-    }
-
-    // SAFETY: The header is now initialized and valid.
-    unsafe {
-        initialize::worker_local_lists(header);
-        initialize::free_list_elements(header);
-        initialize::slab_shared_meta(header);
+        initialize::allocator(header, slab_size, num_workers, layout);
     }
 
     Ok(header)
@@ -166,35 +144,56 @@ fn open_file(file_path: impl AsRef<Path>) -> Result<File, Error> {
     Ok(file)
 }
 
-mod initialize {
+pub mod initialize {
     use super::*;
     use crate::{
         header::WorkerLocalListPartialFullHeads, index::NULL_U16, size_classes::NUM_SIZE_CLASSES,
         slab_meta::SlabMeta,
     };
 
+    /// Initialize the allocator's backing memory.
+    ///
+    /// # Safety
+    /// - `header` must be a valid pointer with sufficient space for a `Header`.
+    /// - `slab_size` must be a valid power of two, used to calculate the `layout`.
+    pub unsafe fn allocator(
+        header: NonNull<Header>,
+        slab_size: u32,
+        num_workers: u32,
+        layout: AllocatorLayout,
+    ) {
+        // SAFETY: The header is valid for any byte pattern, and we are initializing it.
+        //         There is sufficient space for a `Header` and trailing data.
+        unsafe {
+            init_header(header, slab_size, num_workers, layout);
+        }
+
+        // SAFETY: The header is assumed to be valid and initialized.
+        unsafe {
+            worker_local_lists(header);
+            free_list_elements(header);
+            slab_shared_meta(header);
+        }
+    }
+
     /// # Safety
     /// - `header` must be a valid pointer with sufficient space for a `Header`.
     /// - Other parameters must be verified or calculated correctly.
-    pub unsafe fn header(
+    unsafe fn init_header(
         mut header: NonNull<Header>,
-        num_workers: u32,
-        num_slabs: u32,
         slab_size: u32,
-        free_list_elements_offset: u32,
-        slab_shared_meta_offset: u32,
-        slab_free_stacks_offset: u32,
-        slabs_offset: u32,
+        num_workers: u32,
+        layout: AllocatorLayout,
     ) {
         // SAFETY: The header is valid for any byte pattern.
         let header = unsafe { header.as_mut() };
         header.num_workers = num_workers;
-        header.num_slabs = num_slabs;
+        header.num_slabs = layout.num_slabs;
         header.slab_size = slab_size;
-        header.free_list_elements_offset = free_list_elements_offset;
-        header.slab_shared_meta_offset = slab_shared_meta_offset;
-        header.slab_free_stacks_offset = slab_free_stacks_offset;
-        header.slabs_offset = slabs_offset;
+        header.free_list_elements_offset = layout.free_list_elements_offset;
+        header.slab_shared_meta_offset = layout.slab_shared_meta_offset;
+        header.slab_free_stacks_offset = layout.slab_free_stacks_offset;
+        header.slabs_offset = layout.slabs_offset;
         header
             .global_free_list_head
             .store(NULL_U32, Ordering::Release);
@@ -205,7 +204,7 @@ mod initialize {
     /// # Safety
     /// - `header` must be a valid pointer to an initialized `Header`
     ///   with sufficient trailing space for an `Allocator`.
-    pub fn worker_local_lists(header: NonNull<Header>) {
+    fn worker_local_lists(header: NonNull<Header>) {
         let num_workers = {
             // SAFETY: The header is assumed to be valid and initialized.
             let header = unsafe { header.as_ref() };
@@ -235,7 +234,7 @@ mod initialize {
     /// # Safety
     /// - `header` must be a valid pointer to an initialized `Header`
     ///   with sufficient trailing space for a an `Allocator`.
-    pub unsafe fn free_list_elements(header: NonNull<Header>) {
+    unsafe fn free_list_elements(header: NonNull<Header>) {
         // SAFETY: The header is assumed to be valid and initialized.
         let (num_slabs, free_list_elements_offset) = {
             let header = unsafe { header.as_ref() };
@@ -267,7 +266,7 @@ mod initialize {
         }
     }
 
-    pub fn slab_shared_meta(header: NonNull<Header>) {
+    fn slab_shared_meta(header: NonNull<Header>) {
         let (num_slabs, slab_shared_meta_offset) = {
             // SAFETY: The header is assumed to be valid and initialized.
             let header = unsafe { header.as_ref() };

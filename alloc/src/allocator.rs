@@ -489,3 +489,79 @@ struct AllocationIndexes {
     slab_index: u32,
     index_within_slab: u16,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        header::layout,
+        init::initialize,
+        size_classes::{MAX_SIZE, SIZE_CLASSES},
+    };
+
+    const TEST_BUFFER_SIZE: usize = 1024 * 1024; // 1 MiB
+
+    fn initialize_for_test(
+        buffer: &mut [u8],
+        slab_size: u32,
+        num_workers: u32,
+        worker_index: u32,
+    ) -> Allocator {
+        let file_size = buffer.len();
+
+        let layout = layout::offsets(file_size, slab_size, num_workers);
+
+        let header = NonNull::new(buffer.as_mut_ptr() as *mut Header).unwrap();
+        // SAFETY: The header is valid for any byte pattern, and we are initializing it with the
+        //         allocator.
+        unsafe {
+            initialize::allocator(header, slab_size, num_workers, layout);
+        }
+
+        // SAFETY: The header/allocator memory is initialized.
+        unsafe { Allocator::new(header, worker_index) }.unwrap()
+    }
+
+    #[test]
+    fn test_allocator() {
+        let mut buffer = vec![0u8; TEST_BUFFER_SIZE];
+        let slab_size = 4096; // 4 KiB
+        let num_workers = 4;
+        let worker_index = 0;
+        let allocator = initialize_for_test(&mut buffer, slab_size, num_workers, worker_index);
+
+        let mut allocations = vec![];
+
+        for size_class in SIZE_CLASSES[..NUM_SIZE_CLASSES - 1].iter() {
+            for size in [size_class - 1, *size_class, size_class + 1] {
+                println!("Allocating size: {}", size);
+                allocations.push(allocator.allocate(size).unwrap());
+            }
+        }
+        for size in [MAX_SIZE - 1, MAX_SIZE] {
+            allocations.push(allocator.allocate(size).unwrap());
+        }
+        assert!(allocator.allocate(MAX_SIZE + 1).is_none());
+
+        // The worker should have local lists for all size classes.
+        for size_index in 0..NUM_SIZE_CLASSES {
+            // SAFETY: The size index is guaranteed to be valid by the loop.
+            let worker_local_list = unsafe { allocator.worker_local_list_partial(size_index) };
+            assert!(worker_local_list.head().is_some());
+        }
+
+        for ptr in allocations {
+            // SAFETY: ptr is valid allocation from the allocator.
+            unsafe {
+                allocator.free(ptr);
+            }
+        }
+
+        // The worker local lists should be empty after freeing.
+        for size_index in 0..NUM_SIZE_CLASSES {
+            // SAFETY: The size index is guaranteed to be valid by the loop.
+            let worker_local_list = unsafe { allocator.worker_local_list_partial(size_index) };
+            assert!(worker_local_list.head().is_none());
+        }
+    }
+}
