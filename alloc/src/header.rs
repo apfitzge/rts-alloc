@@ -188,7 +188,7 @@ mod tests {
         assert_eq!(offset, 1536);
 
         offset += layout::free_stacks_size(num_slabs, slab_size);
-        assert_eq!(offset, 2304);
+        assert_eq!(offset, 1824);
 
         offset = layout::pad_for_slabs(offset, slab_size);
         assert_eq!(offset, 4096);

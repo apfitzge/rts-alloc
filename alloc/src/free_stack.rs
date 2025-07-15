@@ -1,4 +1,3 @@
-use crate::cache_aligned::CacheAlignedU16;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU16, Ordering};
 
@@ -11,7 +10,9 @@ use core::sync::atomic::{AtomicU16, Ordering};
 #[repr(C)]
 pub struct FreeStack {
     /// The current number of items in the stack - i.e. the top index.
-    top: CacheAlignedU16,
+    top: AtomicU16,
+    /// The current capacity of the stack.
+    capacity: AtomicU16,
     /// Trailing array of `u16` indices.
     stack: [AtomicU16; 0],
 }
@@ -28,6 +29,7 @@ impl FreeStack {
     /// - The trailing `stack` must be initialized correctly, with space for
     ///   at least `capacity` items.
     pub unsafe fn reset(&self, capacity: u16) {
+        self.capacity.store(capacity, Ordering::Relaxed);
         self.top.store(capacity, Ordering::Relaxed);
         // Initialize the stack in reverse sequential order.
         let stack = self.stack();
@@ -94,6 +96,11 @@ impl FreeStack {
         self.len() == 0
     }
 
+    /// Returns true if the stack if full.
+    pub fn is_full(&self) -> bool {
+        self.len() == self.capacity.load(Ordering::Relaxed)
+    }
+
     /// Return a value at a specific index.
     ///
     /// # Safety
@@ -126,14 +133,17 @@ mod tests {
         unsafe {
             stack.reset(max_capacity as u16);
         }
+        assert!(stack.is_full());
 
         // Pop until empty.
         for index in 0..max_capacity {
             // Safety: stack initialized with space for `max_capacity` items.
             assert_eq!(unsafe { stack.pop() }, Some(index));
+            assert!(!stack.is_full());
         }
         // Safety: stack initialized with space for `max_capacity` items.
         assert_eq!(unsafe { stack.pop() }, None);
+        assert!(!stack.is_full());
 
         // Push back all items.
         for index in 0..max_capacity {
@@ -141,6 +151,7 @@ mod tests {
                 stack.push(index);
             }
         }
+        assert!(stack.is_full());
 
         // Pop until empty again, this time items are in reverse order.
         for index in (0..max_capacity).rev() {

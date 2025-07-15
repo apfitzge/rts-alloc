@@ -113,6 +113,13 @@ impl Allocator {
         let slab_index = self.global_free_list().pop()?;
         // SAFETY: The slab index is guaranteed to be valid by `pop`.
         unsafe { self.slab_meta(slab_index).as_ref() }.assign(self.worker_index, size_index);
+        // SAFETY:
+        // - The slab index is guaranteed to be valid by `pop`.
+        // - The size index is guaranteed to be valid by the caller.
+        unsafe {
+            let slab_capacity = self.header.as_ref().slab_size / size_class(size_index);
+            self.slab_free_stack(slab_index).reset(slab_capacity as u16);
+        };
         // SAFETY: The size index is guaranteed to be valid by caller.
         let mut worker_local_list = unsafe { self.worker_local_list_partial(size_index) };
         // SAFETY: The slab index is guaranteed to be valid by `pop`.
