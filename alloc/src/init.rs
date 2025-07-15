@@ -47,24 +47,22 @@ pub fn create(
     let file = create_file(path, file_size)?;
     let mmap = open_mmap(&file, file_size)?;
 
-    let mut header = NonNull::new(mmap.cast::<Header>()).ok_or(Error::MMapError(0))?;
+    let header = NonNull::new(mmap.cast::<Header>()).ok_or(Error::MMapError(0))?;
 
     // Initialize the header.
-    {
-        // SAFETY: The header is valid for any byte pattern.
-        let header = unsafe { header.as_mut() };
-        header.num_workers = num_workers;
-        header.num_slabs = num_slabs;
-        header.slab_size = slab_size;
-        header.free_list_elements_offset = free_list_elements_offset;
-        header.slab_shared_meta_offset = slab_shared_meta_offset;
-        header.slab_free_stacks_offset = slab_free_stacks_offset;
-        header.slabs_offset = slabs_offset;
-        header
-            .global_free_list_head
-            .store(NULL_U32, Ordering::Release);
-        header.magic = crate::header::MAGIC;
-        header.version = crate::header::VERSION;
+    // SAFETY: The header is valid for any byte pattern, and we are initializing it.
+    //         There is sufficient space for a `Header` and trailing data.
+    unsafe {
+        initialize::header(
+            header,
+            num_workers,
+            num_slabs,
+            slab_size,
+            free_list_elements_offset,
+            slab_shared_meta_offset,
+            slab_free_stacks_offset,
+            slabs_offset,
+        );
     }
 
     // SAFETY: The header is now initialized and valid.
@@ -174,6 +172,35 @@ mod initialize {
         header::WorkerLocalListPartialFullHeads, index::NULL_U16, size_classes::NUM_SIZE_CLASSES,
         slab_meta::SlabMeta,
     };
+
+    /// # Safety
+    /// - `header` must be a valid pointer with sufficient space for a `Header`.
+    /// - Other parameters must be verified or calculated correctly.
+    pub unsafe fn header(
+        mut header: NonNull<Header>,
+        num_workers: u32,
+        num_slabs: u32,
+        slab_size: u32,
+        free_list_elements_offset: u32,
+        slab_shared_meta_offset: u32,
+        slab_free_stacks_offset: u32,
+        slabs_offset: u32,
+    ) {
+        // SAFETY: The header is valid for any byte pattern.
+        let header = unsafe { header.as_mut() };
+        header.num_workers = num_workers;
+        header.num_slabs = num_slabs;
+        header.slab_size = slab_size;
+        header.free_list_elements_offset = free_list_elements_offset;
+        header.slab_shared_meta_offset = slab_shared_meta_offset;
+        header.slab_free_stacks_offset = slab_free_stacks_offset;
+        header.slabs_offset = slabs_offset;
+        header
+            .global_free_list_head
+            .store(NULL_U32, Ordering::Release);
+        header.magic = crate::header::MAGIC;
+        header.version = crate::header::VERSION;
+    }
 
     /// # Safety
     /// - `header` must be a valid pointer to an initialized `Header`
