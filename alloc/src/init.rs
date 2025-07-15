@@ -26,6 +26,9 @@ pub fn create(
     slab_size: u32,
     delete_existing: bool,
 ) -> Result<NonNull<Header>, Error> {
+    if num_workers == 0 {
+        return Err(Error::InvalidNumWorkers);
+    }
     verify_slab_size(slab_size)?;
 
     // Given parameters, calculate layout.
@@ -64,7 +67,10 @@ pub fn join(path: impl AsRef<Path>) -> Result<NonNull<Header>, Error> {
     {
         // SAFETY: The header is assumed to be valid and initialized.
         let header = unsafe { header.as_ref() };
-        if header.magic != crate::header::MAGIC || header.version != crate::header::VERSION {
+        if header.magic != crate::header::MAGIC
+            || header.version != crate::header::VERSION
+            || header.num_workers == 0
+        {
             return Err(Error::InvalidHeader);
         }
         verify_slab_size(header.slab_size)?;
