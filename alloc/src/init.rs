@@ -1,5 +1,4 @@
 use crate::{
-    allocator::Allocator,
     error::Error,
     free_list_element::FreeListElement,
     header::{
@@ -18,19 +17,15 @@ use std::{
     sync::atomic::Ordering,
 };
 
-/// Create and initialize the allocator.
+/// Create and initialize the allocator's backing file.
+/// Returns pointer to header.
 pub fn create(
     path: impl AsRef<Path>,
     file_size: usize,
     num_workers: u32,
     slab_size: u32,
-    worker_index: u32,
     delete_existing: bool,
-) -> Result<Allocator, Error> {
-    // Verify that requested parameters are valid.
-    if worker_index >= num_workers {
-        return Err(Error::InvalidWorkerIndex);
-    }
+) -> Result<NonNull<Header>, Error> {
     verify_slab_size(slab_size)?;
 
     // Given parameters, calculate layout.
@@ -79,12 +74,11 @@ pub fn create(
         initialize::slab_shared_meta(header);
     }
 
-    // SAFETY: The header is now initialized and valid.
-    unsafe { Allocator::new(header, worker_index) }
+    Ok(header)
 }
 
-/// Join an existing allocator.
-pub fn join(path: impl AsRef<Path>, worker_index: u32) -> Result<Allocator, Error> {
+/// Join an existing allocator, returning a pointer to the header.
+pub fn join(path: impl AsRef<Path>) -> Result<NonNull<Header>, Error> {
     let file = open_file(path)?;
     let file_size = file.metadata().map_err(Error::IoError)?.len() as usize;
     let mmap = open_mmap(&file, file_size)?;
@@ -98,10 +92,6 @@ pub fn join(path: impl AsRef<Path>, worker_index: u32) -> Result<Allocator, Erro
             return Err(Error::InvalidHeader);
         }
         verify_slab_size(header.slab_size)?;
-        if worker_index >= header.num_workers {
-            return Err(Error::InvalidWorkerIndex);
-        }
-
         let expected_layout = layout::offsets(file_size, header.slab_size, header.num_workers);
 
         if header.num_slabs != expected_layout.num_slabs
@@ -114,8 +104,7 @@ pub fn join(path: impl AsRef<Path>, worker_index: u32) -> Result<Allocator, Erro
         }
     }
 
-    // SAFETY: The header is initialized and valid.
-    unsafe { Allocator::new(header, worker_index) }
+    Ok(header)
 }
 
 fn verify_slab_size(slab_size: u32) -> Result<(), Error> {

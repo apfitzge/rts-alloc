@@ -10,6 +10,7 @@ use crate::{error::Error, header::Header, size_classes::size_class_index};
 use core::mem::offset_of;
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
+use std::path::Path;
 
 pub struct Allocator {
     header: NonNull<Header>,
@@ -17,11 +18,43 @@ pub struct Allocator {
 }
 
 impl Allocator {
+    /// Create a new `Allocator` with new file and given parameters.
+    pub fn create(
+        path: impl AsRef<Path>,
+        file_size: usize,
+        num_workers: u32,
+        slab_size: u32,
+        delete_existing: bool,
+        worker_index: u32,
+    ) -> Result<Self, Error> {
+        if worker_index >= num_workers {
+            return Err(Error::InvalidWorkerIndex);
+        }
+        let header = crate::init::create(path, file_size, num_workers, slab_size, delete_existing)?;
+
+        // SAFETY: The header is guaranteed to be valid and initialized.
+        unsafe { Allocator::new(header, worker_index) }
+    }
+
+    /// Join an existing allocator at the given path.
+    pub fn join(path: impl AsRef<Path>, worker_index: u32) -> Result<Self, Error> {
+        let header = crate::init::join(path)?;
+
+        // Check if the worker index is valid.
+        // SAFETY: The header is guaranteed to be valid and initialized.
+        if worker_index >= unsafe { header.as_ref() }.num_workers {
+            return Err(Error::InvalidWorkerIndex);
+        }
+
+        // SAFETY: The header is guaranteed to be valid and initialized.
+        unsafe { Allocator::new(header, worker_index) }
+    }
+
     /// Creates a new `Allocator` for the given worker index.
     ///
     /// # Safety
     /// - The `header` must point to a valid header of an initialized allocator.
-    pub unsafe fn new(header: NonNull<Header>, worker_index: u32) -> Result<Self, Error> {
+    unsafe fn new(header: NonNull<Header>, worker_index: u32) -> Result<Self, Error> {
         // SAFETY: The header is assumed to be valid and initialized.
         if worker_index >= unsafe { header.as_ref() }.num_workers {
             return Err(Error::InvalidWorkerIndex);
