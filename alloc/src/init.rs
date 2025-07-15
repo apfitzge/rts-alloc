@@ -123,7 +123,9 @@ fn verify_slab_size(slab_size: u32) -> Result<(), Error> {
         return Err(Error::InvalidSlabSize);
     }
 
-    if slab_size < MAX_SIZE {
+    // If the slab size is not large enough to hold at least 4 allocations,
+    // then there's really no point to having a slab allocator.
+    if slab_size > 4 * MAX_SIZE {
         return Err(Error::InvalidSlabSize);
     }
 

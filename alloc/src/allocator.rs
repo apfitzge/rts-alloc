@@ -153,24 +153,52 @@ impl Allocator {
 
     fn local_free(&self, allocation_indexes: AllocationIndexes) {
         // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
-        let was_full = unsafe {
+        let (was_full, is_empty) = unsafe {
             let free_stack = self.slab_free_stack(allocation_indexes.slab_index);
             let was_full = free_stack.is_empty();
             free_stack.push(allocation_indexes.index_within_slab);
-            was_full
+            // Names confusing:
+            // - When the **free** stack is empty, the slab is full of allocations.
+            // - When the **free** stack is full, the slab has no allocations available.
+            (was_full, free_stack.is_full())
         };
-        if was_full {
-            // Remove the slab from the worker's full list,
-            // and move it to the worker's partial list.
-            // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
-            unsafe {
-                self.worker_local_list_full(allocation_indexes.slab_index as usize)
-                    .remove(allocation_indexes.slab_index);
+
+        match (was_full, is_empty) {
+            (true, true) => {
+                // The slab was full and is now empty - this cannot happen unless the slab
+                // size is equal to the size class.
+                unreachable!("slab can only contain one allocation - this is not allowed");
             }
-            // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
-            unsafe {
-                self.worker_local_list_partial(allocation_indexes.slab_index as usize)
-                    .push(allocation_indexes.slab_index);
+            (true, false) => {
+                // The slab was full and is now partially full. It must be moved
+                // from the worker's full list to the worker's partial list.
+                // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
+                unsafe {
+                    self.worker_local_list_full(allocation_indexes.slab_index as usize)
+                        .remove(allocation_indexes.slab_index);
+                }
+                // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
+                unsafe {
+                    self.worker_local_list_partial(allocation_indexes.slab_index as usize)
+                        .push(allocation_indexes.slab_index);
+                }
+            }
+            (false, true) => {
+                // The slab was partially full and is now empty.
+                // It must be moved from the worker's partial list to the global free list.
+                // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
+                unsafe {
+                    self.worker_local_list_partial(allocation_indexes.slab_index as usize)
+                        .remove(allocation_indexes.slab_index);
+                }
+                // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
+                unsafe {
+                    self.global_free_list().push(allocation_indexes.slab_index);
+                }
+            }
+            (false, false) => {
+                // The slab was partially full and is still partially full.
+                // No action is needed, just return.
             }
         }
     }
