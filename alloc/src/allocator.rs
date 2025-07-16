@@ -255,23 +255,23 @@ impl Allocator {
     ///
     /// # Safety
     /// - The `ptr` must be a valid pointer in the allocator's address space.
-    pub unsafe fn offset(&self, ptr: NonNull<u8>) -> u32 {
-        ptr.byte_offset_from_unsigned(self.header) as u32
+    pub unsafe fn offset(&self, ptr: NonNull<u8>) -> usize {
+        ptr.byte_offset_from_unsigned(self.header)
     }
 
     /// Return a ptr given a shareable offset - calculated by `offset`.
-    pub fn ptr_from_offset(&self, offset: u32) -> NonNull<u8> {
+    pub fn ptr_from_offset(&self, offset: usize) -> NonNull<u8> {
         unsafe { self.header.byte_add(offset as usize) }.cast()
     }
 
     /// Find the slab index and index within the slab for a given offset.
-    fn find_allocation_indexes(&self, offset: u32) -> AllocationIndexes {
+    fn find_allocation_indexes(&self, offset: usize) -> AllocationIndexes {
         let (slab_index, offset_within_slab) = {
             // SAFETY: The header is assumed to be valid and initialized.
             let header = unsafe { self.header.as_ref() };
-            debug_assert!(offset >= header.slabs_offset);
-            let offset_from_slab_start = offset.wrapping_sub(header.slabs_offset);
-            let slab_index = offset_from_slab_start / header.slab_size;
+            debug_assert!(offset >= header.slabs_offset as usize);
+            let offset_from_slab_start = offset.wrapping_sub(header.slabs_offset as usize);
+            let slab_index = (offset_from_slab_start / header.slab_size as usize) as u32;
             debug_assert!(slab_index < header.num_slabs, "slab index out of bounds");
 
             // SAFETY: The slab size is guaranteed to be a power of 2, for a valid header.
@@ -301,9 +301,9 @@ impl Allocator {
     ///
     /// # Safety
     /// - The `slab_size` must be a power of 2.
-    const unsafe fn offset_within_slab(slab_size: u32, offset_from_slab_start: u32) -> u32 {
+    const unsafe fn offset_within_slab(slab_size: u32, offset_from_slab_start: usize) -> u32 {
         debug_assert!(slab_size.is_power_of_two());
-        offset_from_slab_start & (slab_size - 1)
+        (offset_from_slab_start & (slab_size as usize - 1)) as u32
     }
 }
 
