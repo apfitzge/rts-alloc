@@ -255,8 +255,13 @@ impl Allocator {
     ///
     /// # Safety
     /// - The `ptr` must be a valid pointer in the allocator's address space.
-    unsafe fn offset(&self, ptr: NonNull<u8>) -> u32 {
+    pub unsafe fn offset(&self, ptr: NonNull<u8>) -> u32 {
         ptr.byte_offset_from_unsigned(self.header) as u32
+    }
+
+    /// Return a ptr given a shareable offset - calculated by `offset`.
+    pub fn ptr_from_offset(&self, offset: u32) -> NonNull<u8> {
+        unsafe { self.header.byte_add(offset as usize) }.cast()
     }
 
     /// Find the slab index and index within the slab for a given offset.
