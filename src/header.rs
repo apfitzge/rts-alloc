@@ -48,6 +48,35 @@ pub struct Header {
 // [slab_shared_meta]
 // [slab_free_stacks]
 // [slabs]
+//
+// header:
+//     - contains metadata about the allocator as a whole.
+//
+// worker_local_list_heads:
+//     - contains heads of the worker local lists.
+//     - each worker has its own set of heads.
+//     - each worker has a partial and full head for each size class.
+//     - the heads store indexes into the free list elements.
+//     - NULL_U32 is used to indicate a null pointer in the linked list.
+//
+// free_list_elements:
+//     - list of free list elements, one per slab.
+//     - the free list elements, in conjunction with the `global_free_list_head`
+//       and `worker_local_list_heads`, form linked lists of slabs, in various states.
+//     - it is NOT valid for a slab to be in multiple lists at the same time.
+//     - NULL_U32 is used to indicate a null pointer in the linked list.
+//
+// slab_shared_meta:
+//     - shared metadata for each slab.
+//
+// slab_free_stacks:
+//     - each slab has its own free stack.
+//     - the free stack is used to track free indices within the slab.
+//
+// slabs:
+//     - the slabs themselves, containing chunks of `slab_size` bytes each.
+//     - guaranteed to be offset a multiple of `slab_size` bytes from the
+//       start of the file.
 pub mod layout {
     use crate::{
         align::round_to_next_alignment_of,
