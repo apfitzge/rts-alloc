@@ -44,7 +44,7 @@ pub fn create(
     let file = create_file(path, file_size)?;
     let mmap = open_mmap(&file, file_size)?;
 
-    let header = NonNull::new(mmap.cast::<Header>()).ok_or(Error::MMapError(0))?;
+    let header = NonNull::new(mmap.cast::<Header>()).expect("mmap already checked for null");
 
     // Initialize the header.
     // SAFETY: The header is valid for any byte pattern.
@@ -61,7 +61,7 @@ pub fn join(path: impl AsRef<Path>) -> Result<NonNull<Header>, Error> {
     let file = open_file(path)?;
     let file_size = file.metadata().map_err(Error::IoError)?.len() as usize;
     let mmap = open_mmap(&file, file_size)?;
-    let header = NonNull::new(mmap.cast::<Header>()).ok_or(Error::MMapError(0))?;
+    let header = NonNull::new(mmap.cast::<Header>()).expect("mmap already checked for null");
 
     // Verify header
     {
@@ -120,7 +120,7 @@ fn open_mmap(file: &File, size: usize) -> Result<*mut c_void, Error> {
     };
 
     if mmap == libc::MAP_FAILED {
-        return Err(Error::MMapError(mmap as usize));
+        return Err(Error::MMapError(std::io::Error::last_os_error()));
     }
 
     Ok(mmap)
