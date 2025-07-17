@@ -1,7 +1,0 @@
-[package]
-name = "rts-alloc"
-version = { workspace = true }
-edition = { workspace = true }
-
-[dependencies]
-libc = { workspace = true }
