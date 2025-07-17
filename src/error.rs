@@ -6,5 +6,5 @@ pub enum Error {
     InvalidFileSize,
     InvalidHeader,
     IoError(std::io::Error),
-    MMapError(usize),
+    MMapError(std::io::Error),
 }
