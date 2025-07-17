@@ -450,7 +450,7 @@ impl Allocator {
     ///
     /// # Safety
     /// - The `slab_index` must be a valid index for the slabs.
-    unsafe fn slab_free_stack(&self, slab_index: u32) -> &FreeStack {
+    unsafe fn slab_free_stack(&self, slab_index: u32) -> FreeStack {
         let (slab_size, offset) = {
             // SAFETY: The header is assumed to be valid and initialized.
             let header = unsafe { self.header.as_ref() };
@@ -458,13 +458,17 @@ impl Allocator {
         };
         let free_stack_size = header::layout::single_free_stack_size(slab_size);
 
-        // SAFETY: The header is guaranteed to be valid and initialized.
-        // The free stacks are laid out sequentially after the slab meta.
-        self.header
-            .byte_add(offset as usize)
-            .byte_add(slab_index as usize * free_stack_size)
-            .cast()
-            .as_ref()
+        // SAFETY: The `FreeStack` layout is guaranteed to have enough room
+        // for top, capacity, and the trailing stack.
+        let top = unsafe {
+            self.header
+                .byte_add(offset as usize)
+                .byte_add(slab_index as usize * free_stack_size)
+                .cast()
+        };
+        let capacity = unsafe { top.add(1) };
+        let trailing_stack = unsafe { capacity.add(1) };
+        unsafe { FreeStack::new(top.as_ref(), capacity.as_ref(), trailing_stack) }
     }
 
     /// Return a pointer to a slab.
