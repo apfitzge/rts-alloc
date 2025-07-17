@@ -502,19 +502,29 @@ mod tests {
         size_classes::{MAX_SIZE, SIZE_CLASSES},
     };
 
+    #[repr(C, align(4096))]
+    struct DummyTypeForAlignment([u8; 4096]);
     const TEST_BUFFER_SIZE: usize = 64 * 1024 * 1024; // 1 MiB
+    const TEST_BUFFER_CAPACITY: usize =
+        TEST_BUFFER_SIZE / core::mem::size_of::<DummyTypeForAlignment>();
+
+    fn test_buffer() -> Vec<DummyTypeForAlignment> {
+        (0..TEST_BUFFER_CAPACITY)
+            .map(|_| DummyTypeForAlignment([0; 4096]))
+            .collect::<Vec<_>>()
+    }
 
     fn initialize_for_test(
-        buffer: &mut [u8],
+        buffer: *mut u8,
         slab_size: u32,
         num_workers: u32,
         worker_index: u32,
     ) -> Allocator {
-        let file_size = buffer.len();
+        let file_size = TEST_BUFFER_SIZE;
 
         let layout = layout::offsets(file_size, slab_size, num_workers);
 
-        let header = NonNull::new(buffer.as_mut_ptr() as *mut Header).unwrap();
+        let header = NonNull::new(buffer as *mut Header).unwrap();
         // SAFETY: The header is valid for any byte pattern, and we are initializing it with the
         //         allocator.
         unsafe {
@@ -525,19 +535,24 @@ mod tests {
         unsafe { Allocator::new(header, worker_index) }.unwrap()
     }
 
-    fn join_for_tests(buffer: &mut [u8], worker_index: u32) -> Allocator {
-        let header = NonNull::new(buffer.as_mut_ptr() as *mut Header).unwrap();
+    fn join_for_tests(buffer: *mut u8, worker_index: u32) -> Allocator {
+        let header = NonNull::new(buffer as *mut Header).unwrap();
         // SAFETY: The header is valid if joining an existing allocator.
         unsafe { Allocator::new(header, worker_index) }.unwrap()
     }
 
     #[test]
     fn test_allocator() {
-        let mut buffer = vec![0u8; TEST_BUFFER_SIZE];
+        let mut buffer = test_buffer();
         let slab_size = 65536; // 64 KiB
         let num_workers = 4;
         let worker_index = 0;
-        let allocator = initialize_for_test(&mut buffer, slab_size, num_workers, worker_index);
+        let allocator = initialize_for_test(
+            buffer.as_mut_ptr().cast(),
+            slab_size,
+            num_workers,
+            worker_index,
+        );
 
         let mut allocations = vec![];
 
@@ -575,11 +590,16 @@ mod tests {
 
     #[test]
     fn test_slab_list_transitions() {
-        let mut buffer = vec![0u8; TEST_BUFFER_SIZE];
+        let mut buffer = test_buffer();
         let slab_size = 65536; // 64 KiB
         let num_workers = 4;
         let worker_index = 0;
-        let allocator = initialize_for_test(&mut buffer, slab_size, num_workers, worker_index);
+        let allocator = initialize_for_test(
+            buffer.as_mut_ptr().cast(),
+            slab_size,
+            num_workers,
+            worker_index,
+        );
 
         let allocation_size = 2048;
         let size_index = size_class_index(allocation_size).unwrap();
@@ -660,11 +680,16 @@ mod tests {
 
     #[test]
     fn test_out_of_slabs() {
-        let mut buffer = vec![0u8; TEST_BUFFER_SIZE];
+        let mut buffer = test_buffer();
         let slab_size = 65536; // 64 KiB
         let num_workers = 4;
         let worker_index = 0;
-        let allocator = initialize_for_test(&mut buffer, slab_size, num_workers, worker_index);
+        let allocator = initialize_for_test(
+            buffer.as_mut_ptr().cast(),
+            slab_size,
+            num_workers,
+            worker_index,
+        );
 
         let num_slabs = unsafe { allocator.header.as_ref() }.num_slabs;
         for index in 0..num_slabs {
@@ -677,12 +702,13 @@ mod tests {
 
     #[test]
     fn test_remote_free_lists() {
-        let mut buffer = vec![0u8; TEST_BUFFER_SIZE];
+        let mut buffer = test_buffer();
         let slab_size = 65536; // 64 KiB
         let num_workers = 4;
 
-        let allocator_0 = initialize_for_test(&mut buffer, slab_size, num_workers, 0);
-        let allocator_1 = join_for_tests(&mut buffer, 1);
+        let allocator_0 =
+            initialize_for_test(buffer.as_mut_ptr().cast(), slab_size, num_workers, 0);
+        let allocator_1 = join_for_tests(buffer.as_mut_ptr().cast(), 1);
 
         let allocation_size = 2048;
         let size_index = size_class_index(allocation_size).unwrap();
