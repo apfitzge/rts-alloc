@@ -349,7 +349,7 @@ impl Allocator {
     }
 
     /// Returns a `GlobalFreeList` to interact with the global free list.
-    fn global_free_list(&self) -> GlobalFreeList {
+    fn global_free_list<'a>(&'a self) -> GlobalFreeList<'a> {
         // SAFETY: The header is assumed to be valid and initialized.
         let head = &unsafe { self.header.as_ref() }.global_free_list_head;
         let list = self.free_list_elements();
@@ -364,7 +364,7 @@ impl Allocator {
     ///
     /// # Safety
     /// - The `size_index` must be a valid index for the size classes.
-    unsafe fn worker_local_list_partial(&self, size_index: usize) -> WorkerLocalList {
+    unsafe fn worker_local_list_partial<'a>(&'a self, size_index: usize) -> WorkerLocalList<'a> {
         let head = &self.worker_head(size_index).partial;
         let list = self.free_list_elements();
 
@@ -379,7 +379,7 @@ impl Allocator {
     ///
     /// # Safety
     /// - The `size_index` must be a valid index for the size classes.
-    unsafe fn worker_local_list_full(&self, size_index: usize) -> WorkerLocalList {
+    unsafe fn worker_local_list_full<'a>(&'a self, size_index: usize) -> WorkerLocalList<'a> {
         let head = &self.worker_head(size_index).full;
         let list = self.free_list_elements();
 
@@ -413,7 +413,7 @@ impl Allocator {
     ///
     /// # Safety
     /// - `slab_index` must be a valid slab index.
-    unsafe fn remote_free_list(&self, slab_index: u32) -> RemoteFreeList {
+    unsafe fn remote_free_list<'a>(&'a self, slab_index: u32) -> RemoteFreeList<'a> {
         let (head, slab_item_size) = {
             // SAFETY: The slab index is guaranteed to be valid by the caller.
             let slab_meta = unsafe { self.slab_meta(slab_index).as_ref() };
@@ -450,7 +450,7 @@ impl Allocator {
     ///
     /// # Safety
     /// - The `slab_index` must be a valid index for the slabs.
-    unsafe fn slab_free_stack(&self, slab_index: u32) -> FreeStack {
+    unsafe fn slab_free_stack<'a>(&'a self, slab_index: u32) -> FreeStack<'a> {
         let (slab_size, offset) = {
             // SAFETY: The header is assumed to be valid and initialized.
             let header = unsafe { self.header.as_ref() };

@@ -21,11 +21,11 @@ impl<'a> FreeStack<'a> {
     ///
     /// # Safety
     /// - `top` must be a valid reference to an `AtomicU16` that
-    ///  represents the current top of the stack.
+    ///   represents the current top of the stack.
     /// - `capacity` must be a valid reference to an `AtomicU16` that
-    /// represents the current capacity of the stack.
+    ///   represents the current capacity of the stack.
     /// - `stack` must be a valid pointer to the trailing array of `AtomicU16`.
-    ///  The stack must have enough space for at least `capacity` items.
+    ///   The stack must have enough space for at least `capacity` items.
     pub unsafe fn new(
         top: &'a AtomicU16,
         capacity: &'a AtomicU16,
