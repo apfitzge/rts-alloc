@@ -12,3 +12,5 @@ mod remote_free_list;
 mod size_classes;
 mod slab_meta;
 mod worker_local_list;
+
+pub use allocator::Allocator;

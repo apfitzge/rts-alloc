@@ -341,7 +341,7 @@ impl Allocator {
 
 impl Allocator {
     /// Returns a pointer to the free list elements in allocator.
-    pub fn free_list_elements(&self) -> NonNull<FreeListElement> {
+    fn free_list_elements(&self) -> NonNull<FreeListElement> {
         // SAFETY: The header is assumed to be valid and initialized.
         let offset = unsafe { self.header.as_ref() }.free_list_elements_offset;
         // SAFETY: The header is guaranteed to be valid and initialized.
@@ -349,7 +349,7 @@ impl Allocator {
     }
 
     /// Returns a `GlobalFreeList` to interact with the global free list.
-    pub fn global_free_list(&self) -> GlobalFreeList {
+    fn global_free_list(&self) -> GlobalFreeList {
         // SAFETY: The header is assumed to be valid and initialized.
         let head = &unsafe { self.header.as_ref() }.global_free_list_head;
         let list = self.free_list_elements();
@@ -364,7 +364,7 @@ impl Allocator {
     ///
     /// # Safety
     /// - The `size_index` must be a valid index for the size classes.
-    pub unsafe fn worker_local_list_partial(&self, size_index: usize) -> WorkerLocalList {
+    unsafe fn worker_local_list_partial(&self, size_index: usize) -> WorkerLocalList {
         let head = &self.worker_head(size_index).partial;
         let list = self.free_list_elements();
 
@@ -379,7 +379,7 @@ impl Allocator {
     ///
     /// # Safety
     /// - The `size_index` must be a valid index for the size classes.
-    pub unsafe fn worker_local_list_full(&self, size_index: usize) -> WorkerLocalList {
+    unsafe fn worker_local_list_full(&self, size_index: usize) -> WorkerLocalList {
         let head = &self.worker_head(size_index).full;
         let list = self.free_list_elements();
 
@@ -413,7 +413,7 @@ impl Allocator {
     ///
     /// # Safety
     /// - `slab_index` must be a valid slab index.
-    pub unsafe fn remote_free_list(&self, slab_index: u32) -> RemoteFreeList {
+    unsafe fn remote_free_list(&self, slab_index: u32) -> RemoteFreeList {
         let (head, slab_item_size) = {
             // SAFETY: The slab index is guaranteed to be valid by the caller.
             let slab_meta = unsafe { self.slab_meta(slab_index).as_ref() };
@@ -437,7 +437,7 @@ impl Allocator {
     ///
     /// # Safety
     /// - The `slab_index` must be a valid index for the slabs.
-    pub unsafe fn slab_meta(&self, slab_index: u32) -> NonNull<SlabMeta> {
+    unsafe fn slab_meta(&self, slab_index: u32) -> NonNull<SlabMeta> {
         // SAFETY: The header is assumed to be valid and initialized.
         let offset = unsafe { self.header.as_ref() }.slab_shared_meta_offset;
         // SAFETY: The header is guaranteed to be valid and initialized.
@@ -450,7 +450,7 @@ impl Allocator {
     ///
     /// # Safety
     /// - The `slab_index` must be a valid index for the slabs.
-    pub unsafe fn slab_free_stack(&self, slab_index: u32) -> &FreeStack {
+    unsafe fn slab_free_stack(&self, slab_index: u32) -> &FreeStack {
         let (slab_size, offset) = {
             // SAFETY: The header is assumed to be valid and initialized.
             let header = unsafe { self.header.as_ref() };
@@ -471,7 +471,7 @@ impl Allocator {
     ///
     /// # Safety
     /// - The `slab_index` must be a valid index for the slabs.
-    pub unsafe fn slab(&self, slab_index: u32) -> NonNull<u8> {
+    unsafe fn slab(&self, slab_index: u32) -> NonNull<u8> {
         let (slab_size, offset) = {
             // SAFETY: The header is assumed to be valid and initialized.
             let header = unsafe { self.header.as_ref() };
