@@ -30,21 +30,6 @@ impl<'a> WorkerLocalList<'a> {
         }
     }
 
-    /// Initializes the worker local list as empty with given `capacity`.
-    /// # Safety
-    /// - `capacity` must be a valid size for the `list`.
-    pub unsafe fn initialize_as_empty(&mut self, capacity: u32) {
-        self.head.store(NULL_U32, Ordering::Release);
-        for slab_index in 0..capacity {
-            // SAFETY: The `slab_index` is a valid index into the `list
-            unsafe {
-                let node = self.get_unchecked(slab_index);
-                node.worker_local_prev.store(NULL_U32, Ordering::Release);
-                node.worker_local_next.store(NULL_U32, Ordering::Release);
-            }
-        }
-    }
-
     /// Pushes `slab_index` onto the head of the worker local list.
     ///
     /// # Safety

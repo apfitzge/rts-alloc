@@ -101,18 +101,6 @@ impl FreeStack {
         self.len() == self.capacity.load(Ordering::Relaxed)
     }
 
-    /// Return a value at a specific index.
-    ///
-    /// # Safety
-    /// - The index must be less than the current length of the stack.
-    /// - Trailing memory must have been initialized correctly.
-    pub unsafe fn get(&self, index: u16) -> u16 {
-        self.stack()
-            .add(usize::from(index))
-            .as_ref()
-            .load(Ordering::Relaxed)
-    }
-
     fn stack(&self) -> NonNull<AtomicU16> {
         // SAFETY: The stack is guaranteed to be non-empty and properly initialized.
         unsafe { NonNull::new_unchecked(self.stack.as_ptr().cast_mut()) }
