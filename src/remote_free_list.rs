@@ -71,12 +71,6 @@ impl<'a> RemoteFreeList<'a> {
         self.iterate_from(current)
     }
 
-    /// Iterate over the remote free list.
-    pub fn iterate(&self) -> impl Iterator<Item = u16> + '_ {
-        // Start iterating from the head of the remote free list.
-        self.iterate_from(self.head.load(Ordering::Acquire))
-    }
-
     /// Iterate over the remote free list starting from a given index.
     fn iterate_from(&self, mut current: u16) -> impl Iterator<Item = u16> + '_ {
         core::iter::from_fn(move || {
@@ -96,6 +90,15 @@ impl<'a> RemoteFreeList<'a> {
             current = item.load(Ordering::Acquire);
             ret
         })
+    }
+}
+
+#[cfg(test)]
+impl<'a> RemoteFreeList<'a> {
+    /// Iterate over the remote free list.
+    pub fn iterate(&self) -> impl Iterator<Item = u16> + '_ {
+        // Start iterating from the head of the remote free list.
+        self.iterate_from(self.head.load(Ordering::Acquire))
     }
 }
 
