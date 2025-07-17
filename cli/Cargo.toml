@@ -1,8 +1,0 @@
-[package]
-name = "rts-cli"
-edition.workspace = true
-version.workspace = true
-
-[dependencies]
-clap = { workspace = true, features = ["derive"] }
-rts-alloc = { workspace = true }
