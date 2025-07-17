@@ -131,7 +131,7 @@ mod tests {
 
         let stack = unsafe { buffer.as_mut_ptr().cast::<FreeStack>().as_mut() }.unwrap();
         unsafe {
-            stack.reset(max_capacity as u16);
+            stack.reset(max_capacity);
         }
         assert!(stack.is_full());
 
