@@ -80,9 +80,9 @@ pub struct Header {
 pub mod layout {
     use crate::{
         align::round_to_next_alignment_of,
-        free_list_element::FreeListElement,
         free_stack::FreeStack,
         header::{Header, WorkerLocalListHeads},
+        linked_list_node::LinkedListNode,
         size_classes::MIN_SIZE,
         slab_meta::SlabMeta,
     };
@@ -145,13 +145,13 @@ pub mod layout {
 
     /// Update offset to padd for free list elements.
     pub const fn pad_for_free_list_elements(offset: usize) -> usize {
-        const FREE_LIST_ELEMENT_ALIGNMENT: usize = core::mem::align_of::<FreeListElement>();
+        const FREE_LIST_ELEMENT_ALIGNMENT: usize = core::mem::align_of::<LinkedListNode>();
         round_to_next_alignment_of::<FREE_LIST_ELEMENT_ALIGNMENT>(offset)
     }
 
     /// The size of the free list elements in bytes.
     pub const fn free_list_elements_size(num_slabs: u32) -> usize {
-        core::mem::size_of::<FreeListElement>() * num_slabs as usize
+        core::mem::size_of::<LinkedListNode>() * num_slabs as usize
     }
 
     /// Update offset to pad for slab shared metadata.

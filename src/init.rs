@@ -1,11 +1,11 @@
 use crate::{
     error::Error,
-    free_list_element::FreeListElement,
     header::{
         layout::{self, AllocatorLayout},
         Header, WorkerLocalListHeads,
     },
     index::NULL_U32,
+    linked_list_node::LinkedListNode,
     size_classes::{MAX_SIZE, MIN_SIZE},
 };
 use std::{
@@ -251,8 +251,8 @@ pub mod initialize {
         };
 
         // SAFETY: The header has enough trailing space for free list elements.
-        let free_list_element_ptr = unsafe { header.byte_add(free_list_elements_offset as usize) }
-            .cast::<FreeListElement>();
+        let free_list_element_ptr =
+            unsafe { header.byte_add(free_list_elements_offset as usize) }.cast::<LinkedListNode>();
 
         for slab_index in 0..num_slabs {
             let global_next = if slab_index == num_slabs - 1 {
