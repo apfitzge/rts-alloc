@@ -104,16 +104,20 @@ impl<'a> RemoteFreeList<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{cache_aligned::CacheAligned, size_classes::MIN_SIZE};
 
-    use super::*;
+    const SLAB_ITEM_SIZE: u32 = MIN_SIZE;
+    #[repr(C, align(256))]
+    struct DummyTypeForAlignment([u8; SLAB_ITEM_SIZE as usize]);
 
     #[test]
     fn test_remote_free_list() {
-        const SLAB_ITEM_SIZE: u32 = MIN_SIZE;
         const TEST_CAPACITY: usize = 128;
         let head = CacheAligned(AtomicU16::new(NULL_U16));
-        let mut slab_backing = vec![[0u8; SLAB_ITEM_SIZE as usize]; TEST_CAPACITY];
+        let mut slab_backing = (0..TEST_CAPACITY)
+            .map(|_| DummyTypeForAlignment([0; SLAB_ITEM_SIZE as usize]))
+            .collect::<Vec<_>>();
         let slab = NonNull::new(slab_backing.as_mut_ptr())
             .unwrap()
             .cast::<u8>();

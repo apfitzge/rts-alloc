@@ -7,20 +7,41 @@ use core::sync::atomic::{AtomicU16, Ordering};
 ///
 /// The stack is NOT thread-safe and should only be accessed by a single
 /// thread at a time.
-#[repr(C)]
-pub struct FreeStack {
+pub struct FreeStack<'a> {
     /// The current number of items in the stack - i.e. the top index.
-    top: AtomicU16,
+    top: &'a AtomicU16,
     /// The current capacity of the stack.
-    capacity: AtomicU16,
+    capacity: &'a AtomicU16,
     /// Trailing array of `u16` indices.
-    stack: [AtomicU16; 0],
+    stack: NonNull<AtomicU16>,
 }
 
-impl FreeStack {
+impl<'a> FreeStack<'a> {
+    /// Creates a new free stack.
+    ///
+    /// # Safety
+    /// - `top` must be a valid reference to an `AtomicU16` that
+    ///   represents the current top of the stack.
+    /// - `capacity` must be a valid reference to an `AtomicU16` that
+    ///   represents the current capacity of the stack.
+    /// - `stack` must be a valid pointer to the trailing array of `AtomicU16`.
+    ///   The stack must have enough space for at least `capacity` items.
+    pub unsafe fn new(
+        top: &'a AtomicU16,
+        capacity: &'a AtomicU16,
+        stack: NonNull<AtomicU16>,
+    ) -> Self {
+        Self {
+            top,
+            capacity,
+            stack,
+        }
+    }
+
     /// Returns the size in bytes of a `FreeStack` with the given `capacity`.
     pub const fn byte_size(capacity: u16) -> usize {
-        core::mem::size_of::<FreeStack>() + (capacity as usize * core::mem::size_of::<u16>())
+        core::mem::size_of::<AtomicU16>() * 2
+            + (capacity as usize * core::mem::size_of::<AtomicU16>())
     }
 
     /// Sets up the free stack with all items free.
@@ -32,9 +53,8 @@ impl FreeStack {
         self.capacity.store(capacity, Ordering::Relaxed);
         self.top.store(capacity, Ordering::Relaxed);
         // Initialize the stack in reverse sequential order.
-        let stack = self.stack();
         for index in 0..capacity {
-            stack
+            self.stack
                 .add(usize::from(index))
                 .as_ref()
                 .store(capacity - index - 1, Ordering::Relaxed);
@@ -59,7 +79,7 @@ impl FreeStack {
         // Read the value at the top of the stack.
         // Safety: The trailing stack is initialized correctly.
         let popped_value = unsafe {
-            self.stack()
+            self.stack
                 .add(usize::from(new_top))
                 .as_ref()
                 .load(Ordering::Relaxed)
@@ -79,7 +99,7 @@ impl FreeStack {
     /// - The stack must not be full.
     pub unsafe fn push(&self, item: u16) {
         let top = self.top.load(Ordering::Relaxed);
-        self.stack()
+        self.stack
             .add(usize::from(top))
             .as_ref()
             .store(item, Ordering::Relaxed);
@@ -100,11 +120,6 @@ impl FreeStack {
     pub fn is_full(&self) -> bool {
         self.len() == self.capacity.load(Ordering::Relaxed)
     }
-
-    fn stack(&self) -> NonNull<AtomicU16> {
-        // SAFETY: The stack is guaranteed to be non-empty and properly initialized.
-        unsafe { NonNull::new_unchecked(self.stack.as_ptr().cast_mut()) }
-    }
 }
 
 #[cfg(test)]
@@ -113,28 +128,31 @@ mod tests {
 
     #[test]
     fn test_free_stack() {
-        let mut buffer = [0u8; 1024];
-        let max_capacity = ((buffer.len() - core::mem::size_of::<FreeStack>())
-            / core::mem::size_of::<u16>()) as u16;
-
-        let stack = unsafe { buffer.as_mut_ptr().cast::<FreeStack>().as_mut() }.unwrap();
+        const MAX_CAPACITY: u16 = 1024;
+        let top = AtomicU16::new(0);
+        let capacity = AtomicU16::new(MAX_CAPACITY);
+        let mut buffer = (0..MAX_CAPACITY)
+            .map(|_| AtomicU16::new(0))
+            .collect::<Vec<_>>();
+        let stack =
+            unsafe { FreeStack::new(&top, &capacity, NonNull::new(buffer.as_mut_ptr()).unwrap()) };
         unsafe {
-            stack.reset(max_capacity);
+            stack.reset(MAX_CAPACITY);
         }
         assert!(stack.is_full());
 
         // Pop until empty.
-        for index in 0..max_capacity {
-            // Safety: stack initialized with space for `max_capacity` items.
+        for index in 0..MAX_CAPACITY {
+            // Safety: stack initialized with space for `MAX_CAPACITY` items.
             assert_eq!(unsafe { stack.pop() }, Some(index));
             assert!(!stack.is_full());
         }
-        // Safety: stack initialized with space for `max_capacity` items.
+        // Safety: stack initialized with space for `MAX_CAPACITY` items.
         assert_eq!(unsafe { stack.pop() }, None);
         assert!(!stack.is_full());
 
         // Push back all items.
-        for index in 0..max_capacity {
+        for index in 0..MAX_CAPACITY {
             unsafe {
                 stack.push(index);
             }
@@ -142,12 +160,12 @@ mod tests {
         assert!(stack.is_full());
 
         // Pop until empty again, this time items are in reverse order.
-        for index in (0..max_capacity).rev() {
-            // Safety: stack initialized with space for `max_capacity` items.
+        for index in (0..MAX_CAPACITY).rev() {
+            // Safety: stack initialized with space for `MAX_CAPACITY` items.
             assert_eq!(unsafe { stack.pop() }, Some(index));
         }
 
-        // Safety: stack initialized with space for `max_capacity` items.
+        // Safety: stack initialized with space for `MAX_CAPACITY` items.
         assert_eq!(unsafe { stack.pop() }, None);
     }
 }
