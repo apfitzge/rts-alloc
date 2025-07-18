@@ -1,4 +1,4 @@
-use crate::free_list_element::FreeListElement;
+use crate::linked_list_node::LinkedListNode;
 use crate::{cache_aligned::CacheAlignedU32, index::NULL_U32};
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
@@ -7,7 +7,7 @@ use core::sync::atomic::Ordering;
 /// This list is safe to use concurrently across processes.
 pub struct GlobalFreeList<'a> {
     head: &'a CacheAlignedU32,
-    list: NonNull<FreeListElement>,
+    list: NonNull<LinkedListNode>,
 }
 
 impl<'a> GlobalFreeList<'a> {
@@ -18,7 +18,7 @@ impl<'a> GlobalFreeList<'a> {
     /// - `list` must be a valid pointer to an array of `FreeListElement` with sufficient capacity.
     pub unsafe fn new(
         head: &'a CacheAlignedU32,
-        list: NonNull<FreeListElement>,
+        list: NonNull<LinkedListNode>,
     ) -> GlobalFreeList<'a> {
         GlobalFreeList { head, list }
     }
@@ -84,7 +84,7 @@ impl<'a> GlobalFreeList<'a> {
     ///
     /// # Safety
     /// - The `slab_index` must be a valid index into the `list`.
-    pub unsafe fn get_unchecked(&self, slab_index: u32) -> &FreeListElement {
+    pub unsafe fn get_unchecked(&self, slab_index: u32) -> &LinkedListNode {
         self.list.add(slab_index as usize).as_ref()
     }
 }
@@ -101,7 +101,7 @@ mod tests {
 
         let head = CacheAligned(AtomicU32::new(NULL_U32));
         let mut buffer = (0..LIST_CAPACITY)
-            .map(|_| FreeListElement {
+            .map(|_| LinkedListNode {
                 global_next: AtomicU32::new(NULL_U32),
                 worker_local_prev: AtomicU32::new(NULL_U32),
                 worker_local_next: AtomicU32::new(NULL_U32),

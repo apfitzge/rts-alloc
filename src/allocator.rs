@@ -1,7 +1,7 @@
-use crate::free_list_element::FreeListElement;
 use crate::free_stack::FreeStack;
 use crate::global_free_list::GlobalFreeList;
 use crate::header::{self, WorkerLocalListHeads, WorkerLocalListPartialFullHeads};
+use crate::linked_list_node::LinkedListNode;
 use crate::remote_free_list::RemoteFreeList;
 use crate::size_classes::{size_class, NUM_SIZE_CLASSES};
 use crate::slab_meta::SlabMeta;
@@ -341,7 +341,7 @@ impl Allocator {
 
 impl Allocator {
     /// Returns a pointer to the free list elements in allocator.
-    fn free_list_elements(&self) -> NonNull<FreeListElement> {
+    fn free_list_elements(&self) -> NonNull<LinkedListNode> {
         // SAFETY: The header is assumed to be valid and initialized.
         let offset = unsafe { self.header.as_ref() }.free_list_elements_offset;
         // SAFETY: The header is guaranteed to be valid and initialized.

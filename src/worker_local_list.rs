@@ -1,4 +1,4 @@
-use crate::{free_list_element::FreeListElement, index::NULL_U32};
+use crate::{index::NULL_U32, linked_list_node::LinkedListNode};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 /// and should only be accessed by the associated worker.
 pub struct WorkerLocalList<'a> {
     head: &'a AtomicU32,
-    list: NonNull<FreeListElement>,
+    list: NonNull<LinkedListNode>,
 }
 
 impl<'a> WorkerLocalList<'a> {
@@ -16,7 +16,7 @@ impl<'a> WorkerLocalList<'a> {
     /// # Safety
     /// - `head` must be a valid index into the `list` or NULL_U32.
     /// - `list` must be a valid pointer to an array of `FreeListElement` with sufficient capacity.
-    pub unsafe fn new(head: &'a AtomicU32, list: NonNull<FreeListElement>) -> Self {
+    pub unsafe fn new(head: &'a AtomicU32, list: NonNull<LinkedListNode>) -> Self {
         Self { head, list }
     }
 
@@ -114,7 +114,7 @@ impl<'a> WorkerLocalList<'a> {
     ///
     /// # Safety
     /// - The `slab_index` must be a valid index into the `list`.
-    unsafe fn get_unchecked(&self, slab_index: u32) -> &FreeListElement {
+    unsafe fn get_unchecked(&self, slab_index: u32) -> &LinkedListNode {
         self.list.add(slab_index as usize).as_ref()
     }
 }
@@ -129,7 +129,7 @@ mod tests {
         const LIST_CAPACITY: u32 = 1024;
         let head = AtomicU32::new(NULL_U32);
         let mut buffer = (0..LIST_CAPACITY)
-            .map(|_| FreeListElement {
+            .map(|_| LinkedListNode {
                 global_next: AtomicU32::new(NULL_U32),
                 worker_local_prev: AtomicU32::new(NULL_U32),
                 worker_local_next: AtomicU32::new(NULL_U32),
