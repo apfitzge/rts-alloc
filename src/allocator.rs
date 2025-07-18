@@ -106,7 +106,7 @@ impl Allocator {
         size_index: usize,
     ) -> Option<NonNull<u8>> {
         // SAFETY: The slab index is guaranteed to be valid by the caller.
-        let free_stack = unsafe { self.slab_free_stack(slab_index) };
+        let mut free_stack = unsafe { self.slab_free_stack(slab_index) };
         let maybe_index_within_slab = free_stack.pop();
 
         // If the slab is empty - remove it from the worker's partial list,
@@ -188,7 +188,7 @@ impl Allocator {
     fn local_free(&self, allocation_indexes: AllocationIndexes) {
         // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
         let (was_full, is_empty) = unsafe {
-            let free_stack = self.slab_free_stack(allocation_indexes.slab_index);
+            let mut free_stack = self.slab_free_stack(allocation_indexes.slab_index);
             let was_full = free_stack.is_empty();
             free_stack.push(allocation_indexes.index_within_slab);
             // Names confusing:
@@ -460,15 +460,15 @@ impl Allocator {
 
         // SAFETY: The `FreeStack` layout is guaranteed to have enough room
         // for top, capacity, and the trailing stack.
-        let top = unsafe {
+        let mut top = unsafe {
             self.header
                 .byte_add(offset as usize)
                 .byte_add(slab_index as usize * free_stack_size)
                 .cast()
         };
-        let capacity = unsafe { top.add(1) };
+        let mut capacity = unsafe { top.add(1) };
         let trailing_stack = unsafe { capacity.add(1) };
-        unsafe { FreeStack::new(top.as_ref(), capacity.as_ref(), trailing_stack) }
+        unsafe { FreeStack::new(top.as_mut(), capacity.as_mut(), trailing_stack) }
     }
 
     /// Return a pointer to a slab.
