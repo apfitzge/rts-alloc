@@ -1,7 +1,7 @@
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU16, Ordering};
 
-/// A lock-free stack that allows pushing and popping of indices.
+/// A simple stack that allows pushing and popping of indices.
+/// Used by a worker to track free slots within a slab that it owns.
 ///
 /// The stack is a trailing array of `u16` indices.
 ///
@@ -9,28 +9,24 @@ use core::sync::atomic::{AtomicU16, Ordering};
 /// thread at a time.
 pub struct FreeStack<'a> {
     /// The current number of items in the stack - i.e. the top index.
-    top: &'a AtomicU16,
+    top: &'a mut u16,
     /// The current capacity of the stack.
-    capacity: &'a AtomicU16,
+    capacity: &'a mut u16,
     /// Trailing array of `u16` indices.
-    stack: NonNull<AtomicU16>,
+    stack: NonNull<u16>,
 }
 
 impl<'a> FreeStack<'a> {
     /// Creates a new free stack.
     ///
     /// # Safety
-    /// - `top` must be a valid reference to an `AtomicU16` that
+    /// - `top` must be a valid reference to an `u16` that
     ///   represents the current top of the stack.
-    /// - `capacity` must be a valid reference to an `AtomicU16` that
+    /// - `capacity` must be a valid reference to an `u16` that
     ///   represents the current capacity of the stack.
-    /// - `stack` must be a valid pointer to the trailing array of `AtomicU16`.
+    /// - `stack` must be a valid pointer to the trailing array of `u16`.
     ///   The stack must have enough space for at least `capacity` items.
-    pub unsafe fn new(
-        top: &'a AtomicU16,
-        capacity: &'a AtomicU16,
-        stack: NonNull<AtomicU16>,
-    ) -> Self {
+    pub unsafe fn new(top: &'a mut u16, capacity: &'a mut u16, stack: NonNull<u16>) -> Self {
         Self {
             top,
             capacity,
@@ -40,8 +36,7 @@ impl<'a> FreeStack<'a> {
 
     /// Returns the size in bytes of a `FreeStack` with the given `capacity`.
     pub const fn byte_size(capacity: u16) -> usize {
-        core::mem::size_of::<AtomicU16>() * 2
-            + (capacity as usize * core::mem::size_of::<AtomicU16>())
+        core::mem::size_of::<u16>() * 2 + (capacity as usize * core::mem::size_of::<u16>())
     }
 
     /// Sets up the free stack with all items free.
@@ -49,15 +44,12 @@ impl<'a> FreeStack<'a> {
     /// # Safety
     /// - The trailing `stack` must be initialized correctly, with space for
     ///   at least `capacity` items.
-    pub unsafe fn reset(&self, capacity: u16) {
-        self.capacity.store(capacity, Ordering::Relaxed);
-        self.top.store(capacity, Ordering::Relaxed);
+    pub unsafe fn reset(&mut self, capacity: u16) {
+        *self.top = capacity;
+        *self.capacity = capacity;
         // Initialize the stack in reverse sequential order.
         for index in 0..capacity {
-            self.stack
-                .add(usize::from(index))
-                .as_ref()
-                .store(capacity - index - 1, Ordering::Relaxed);
+            *self.stack.add(usize::from(index)).as_mut() = capacity - index - 1;
         }
     }
 
@@ -66,27 +58,21 @@ impl<'a> FreeStack<'a> {
     ///
     /// # Safety
     /// - The trailing `stack` must be initialized correctly.
-    pub unsafe fn pop(&self) -> Option<u16> {
-        let top = self.top.load(Ordering::Relaxed);
-        if top == 0 {
+    pub unsafe fn pop(&mut self) -> Option<u16> {
+        if *self.top == 0 {
             return None;
         }
 
         // Only a single thread should be accessing the free-stack at a time.
         // This allows it to be extremely simple and lock free.
-        let new_top = top - 1;
+        let new_top = *self.top - 1;
 
         // Read the value at the top of the stack.
         // Safety: The trailing stack is initialized correctly.
-        let popped_value = unsafe {
-            self.stack
-                .add(usize::from(new_top))
-                .as_ref()
-                .load(Ordering::Relaxed)
-        };
+        let popped_value = *unsafe { self.stack.add(usize::from(new_top)).as_ref() };
 
         // Update the top of the stack.
-        self.top.store(new_top, Ordering::Relaxed);
+        *self.top = new_top;
 
         Some(popped_value)
     }
@@ -97,18 +83,15 @@ impl<'a> FreeStack<'a> {
     /// - The trailing `stack` must be initialized correctly.
     /// - The item must be a valid index into the stack.
     /// - The stack must not be full.
-    pub unsafe fn push(&self, item: u16) {
-        let top = self.top.load(Ordering::Relaxed);
-        self.stack
-            .add(usize::from(top))
-            .as_ref()
-            .store(item, Ordering::Relaxed);
-        self.top.store(top + 1, Ordering::Relaxed);
+    pub unsafe fn push(&mut self, item: u16) {
+        let top = *self.top;
+        *self.stack.add(usize::from(top)).as_mut() = item;
+        *self.top = top + 1;
     }
 
     /// Returns the current top value - i.e. the size.
     pub fn len(&self) -> u16 {
-        self.top.load(Ordering::Relaxed)
+        *self.top
     }
 
     /// Returns true if the stack is empty.
@@ -118,7 +101,7 @@ impl<'a> FreeStack<'a> {
 
     /// Returns true if the stack if full.
     pub fn is_full(&self) -> bool {
-        self.len() == self.capacity.load(Ordering::Relaxed)
+        self.len() == *self.capacity
     }
 }
 
@@ -129,13 +112,16 @@ mod tests {
     #[test]
     fn test_free_stack() {
         const MAX_CAPACITY: u16 = 1024;
-        let top = AtomicU16::new(0);
-        let capacity = AtomicU16::new(MAX_CAPACITY);
-        let mut buffer = (0..MAX_CAPACITY)
-            .map(|_| AtomicU16::new(0))
-            .collect::<Vec<_>>();
-        let stack =
-            unsafe { FreeStack::new(&top, &capacity, NonNull::new(buffer.as_mut_ptr()).unwrap()) };
+        let mut top = 0;
+        let mut capacity = MAX_CAPACITY;
+        let mut buffer = [0; MAX_CAPACITY as usize];
+        let mut stack = unsafe {
+            FreeStack::new(
+                &mut top,
+                &mut capacity,
+                NonNull::new(buffer.as_mut_ptr()).unwrap(),
+            )
+        };
         unsafe {
             stack.reset(MAX_CAPACITY);
         }
