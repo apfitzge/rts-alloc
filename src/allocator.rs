@@ -256,7 +256,7 @@ impl Allocator {
     /// # Safety
     /// - The `ptr` must be a valid pointer in the allocator's address space.
     pub unsafe fn offset(&self, ptr: NonNull<u8>) -> usize {
-        ptr.byte_offset_from_unsigned(self.header)
+        ptr.byte_offset_from(self.header) as usize
     }
 
     /// Return a ptr given a shareable offset - calculated by `offset`.
