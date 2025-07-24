@@ -14,6 +14,7 @@ use std::path::Path;
 
 pub struct Allocator {
     header: NonNull<Header>,
+    file_size: usize,
     worker_index: u32,
 }
 
@@ -33,12 +34,12 @@ impl Allocator {
         let header = crate::init::create(path, file_size, num_workers, slab_size, delete_existing)?;
 
         // SAFETY: The header is guaranteed to be valid and initialized.
-        unsafe { Allocator::new(header, worker_index) }
+        unsafe { Allocator::new(header, file_size, worker_index) }
     }
 
     /// Join an existing allocator at the given path.
     pub fn join(path: impl AsRef<Path>, worker_index: u32) -> Result<Self, Error> {
-        let header = crate::init::join(path)?;
+        let (header, file_size) = crate::init::join(path)?;
 
         // Check if the worker index is valid.
         // SAFETY: The header is guaranteed to be valid and initialized.
@@ -47,22 +48,44 @@ impl Allocator {
         }
 
         // SAFETY: The header is guaranteed to be valid and initialized.
-        unsafe { Allocator::new(header, worker_index) }
+        unsafe { Allocator::new(header, file_size, worker_index) }
     }
 
     /// Creates a new `Allocator` for the given worker index.
     ///
     /// # Safety
     /// - The `header` must point to a valid header of an initialized allocator.
-    unsafe fn new(header: NonNull<Header>, worker_index: u32) -> Result<Self, Error> {
+    unsafe fn new(
+        header: NonNull<Header>,
+        file_size: usize,
+        worker_index: u32,
+    ) -> Result<Self, Error> {
         // SAFETY: The header is assumed to be valid and initialized.
         if worker_index >= unsafe { header.as_ref() }.num_workers {
             return Err(Error::InvalidWorkerIndex);
         }
         Ok(Allocator {
             header,
+            file_size,
             worker_index,
         })
+    }
+}
+
+impl Drop for Allocator {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        {
+            // In tests, we do not mmap.
+            return;
+        }
+
+        #[allow(unreachable_code)]
+        // SAFETY: The header is guaranteed to be valid and initialized.
+        //         And outside of tests the allocator is mmaped.
+        unsafe {
+            libc::munmap(self.header.as_ptr() as *mut libc::c_void, self.file_size);
+        }
     }
 }
 
@@ -536,13 +559,13 @@ mod tests {
         }
 
         // SAFETY: The header/allocator memory is initialized.
-        unsafe { Allocator::new(header, worker_index) }.unwrap()
+        unsafe { Allocator::new(header, file_size, worker_index) }.unwrap()
     }
 
     fn join_for_tests(buffer: *mut u8, worker_index: u32) -> Allocator {
         let header = NonNull::new(buffer as *mut Header).unwrap();
         // SAFETY: The header is valid if joining an existing allocator.
-        unsafe { Allocator::new(header, worker_index) }.unwrap()
+        unsafe { Allocator::new(header, TEST_BUFFER_SIZE, worker_index) }.unwrap()
     }
 
     #[test]
