@@ -56,8 +56,8 @@ pub fn create(
     Ok(header)
 }
 
-/// Join an existing allocator, returning a pointer to the header.
-pub fn join(path: impl AsRef<Path>) -> Result<NonNull<Header>, Error> {
+/// Join an existing allocator, returning a pointer to the header and size.
+pub fn join(path: impl AsRef<Path>) -> Result<(NonNull<Header>, usize), Error> {
     let file = open_file(path)?;
     let file_size = file.metadata().map_err(Error::IoError)?.len() as usize;
     let mmap = open_mmap(&file, file_size)?;
@@ -86,7 +86,7 @@ pub fn join(path: impl AsRef<Path>) -> Result<NonNull<Header>, Error> {
         }
     }
 
-    Ok(header)
+    Ok((header, file_size))
 }
 
 fn verify_slab_size(slab_size: u32) -> Result<(), Error> {
