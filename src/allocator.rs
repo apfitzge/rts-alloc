@@ -37,6 +37,9 @@ impl Allocator {
     }
 
     /// Join an existing allocator at the given path.
+    ///
+    /// # Safety
+    /// - `worker_index` must be uniquely assigned to this worker thread/process.
     pub fn join(path: impl AsRef<Path>, worker_index: u32) -> Result<Self, Error> {
         let (header, file_size) = crate::init::join(path)?;
 
