@@ -25,13 +25,12 @@ impl Allocator {
         file_size: usize,
         num_workers: u32,
         slab_size: u32,
-        delete_existing: bool,
         worker_index: u32,
     ) -> Result<Self, Error> {
         if worker_index >= num_workers {
             return Err(Error::InvalidWorkerIndex);
         }
-        let header = crate::init::create(path, file_size, num_workers, slab_size, delete_existing)?;
+        let header = crate::init::create(path, file_size, num_workers, slab_size)?;
 
         // SAFETY: The header is guaranteed to be valid and initialized.
         unsafe { Allocator::new(header, file_size, worker_index) }

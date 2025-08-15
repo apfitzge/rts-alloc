@@ -24,7 +24,6 @@ pub fn create(
     file_size: usize,
     num_workers: u32,
     slab_size: u32,
-    delete_existing: bool,
 ) -> Result<NonNull<Header>, Error> {
     if num_workers == 0 {
         return Err(Error::InvalidNumWorkers);
@@ -38,9 +37,6 @@ pub fn create(
     }
 
     // Create the file and mmap it.
-    if delete_existing && path.as_ref().exists() {
-        std::fs::remove_file(path.as_ref()).map_err(Error::IoError)?;
-    }
     let file = create_file(path, file_size)?;
     let mmap = open_mmap(&file, file_size)?;
 
