@@ -2,7 +2,10 @@
 name = "rts-alloc"
 edition = "2021"
 version = "0.1.0"
-
+description = "Shared memory allocator intended for small frequent allocations"
+license = "LICENSE"
+repository = "https://github.com/apfitzge/rts-alloc"
+authors = ["Andrew Fitzgerald <apfitzge@gmail.com>"]
 
 [dependencies]
 libc = { version = "0.2.174" }
