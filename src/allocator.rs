@@ -13,87 +13,110 @@ use core::sync::atomic::Ordering;
 use std::fs::File;
 
 pub struct Allocator {
+    base: AllocatorBase,
+    worker_index: u32,
+}
+
+pub struct FreeOnlyAllocator {
+    base: AllocatorBase,
+}
+
+struct AllocatorBase {
     header: NonNull<Header>,
     file_size: usize,
-    worker_index: u32,
 }
 
 impl Allocator {
     /// Create a new `Allocator` in the provided file with the given parameters.
+    /// `min_workers` is the minimum number of workers to support.
     pub fn create(
         file: &File,
         file_size: usize,
-        num_workers: u32,
+        min_workers: u32,
         slab_size: u32,
-        worker_index: u32,
     ) -> Result<Self, Error> {
-        if worker_index >= num_workers {
-            return Err(Error::InvalidWorkerIndex);
-        }
-        let header = crate::init::create(file, file_size, num_workers, slab_size)?;
+        let header = crate::init::create(file, file_size, min_workers, slab_size)?;
+        let worker_index = match unsafe { claim_any_worker_index(header) } {
+            Some(worker_index) => worker_index,
+            None => {
+                #[cfg(not(test))]
+                unsafe {
+                    libc::munmap(header.as_ptr() as *mut libc::c_void, file_size);
+                }
+                return Err(Error::NoAvailableWorkers);
+            }
+        };
 
         // SAFETY: The header is guaranteed to be valid and initialized.
-        unsafe { Allocator::new(header, file_size, worker_index) }
+        Allocator::new(header, file_size, worker_index)
     }
 
     /// Join an existing allocator in the provided file.
-    ///
-    /// # Safety
-    /// - `worker_index` must be uniquely assigned to this worker thread/process.
-    pub unsafe fn join(file: &File, worker_index: u32) -> Result<Self, Error> {
+    /// Picks the first available worker slot.
+    pub fn join(file: &File) -> Result<Self, Error> {
         let (header, file_size) = crate::init::join(file)?;
+        let worker_index = match unsafe { claim_any_worker_index(header) } {
+            Some(worker_index) => worker_index,
+            None => {
+                #[cfg(not(test))]
+                unsafe {
+                    libc::munmap(header.as_ptr() as *mut libc::c_void, file_size);
+                }
+                return Err(Error::NoAvailableWorkers);
+            }
+        };
 
-        // Check if the worker index is valid.
         // SAFETY: The header is guaranteed to be valid and initialized.
-        if worker_index >= unsafe { header.as_ref() }.num_workers {
-            return Err(Error::InvalidWorkerIndex);
-        }
-
-        // SAFETY: The header is guaranteed to be valid and initialized.
-        unsafe { Allocator::new(header, file_size, worker_index) }
+        Allocator::new(header, file_size, worker_index)
     }
 
     /// Creates a new `Allocator` for the given worker index.
     ///
     /// # Safety
     /// - The `header` must point to a valid header of an initialized allocator.
-    unsafe fn new(
-        header: NonNull<Header>,
-        file_size: usize,
-        worker_index: u32,
-    ) -> Result<Self, Error> {
+    fn new(header: NonNull<Header>, file_size: usize, worker_index: u32) -> Result<Self, Error> {
         // SAFETY: The header is assumed to be valid and initialized.
         if worker_index >= unsafe { header.as_ref() }.num_workers {
             return Err(Error::InvalidWorkerIndex);
         }
         Ok(Allocator {
-            header,
-            file_size,
+            base: AllocatorBase::new(header, file_size),
             worker_index,
         })
     }
 }
 
 unsafe impl Send for Allocator {}
+unsafe impl Send for FreeOnlyAllocator {}
 
 impl Drop for Allocator {
     fn drop(&mut self) {
-        #[cfg(test)]
-        {
-            // In tests, we do not mmap.
-            return;
-        }
+        self.release_worker();
+        self.base.unmap();
+    }
+}
 
-        #[allow(unreachable_code)]
-        // SAFETY: The header is guaranteed to be valid and initialized.
-        //         And outside of tests the allocator is mmaped.
-        unsafe {
-            libc::munmap(self.header.as_ptr() as *mut libc::c_void, self.file_size);
-        }
+impl Drop for FreeOnlyAllocator {
+    fn drop(&mut self) {
+        self.base.unmap();
+    }
+}
+
+impl FreeOnlyAllocator {
+    /// Join an existing allocator in the provided file.
+    pub fn join(file: &File) -> Result<Self, Error> {
+        let (header, file_size) = crate::init::join(file)?;
+        Ok(FreeOnlyAllocator {
+            base: AllocatorBase::new(header, file_size),
+        })
     }
 }
 
 impl Allocator {
+    fn release_worker(&self) {
+        self.worker_meta().claimed.store(0, Ordering::Release);
+    }
+
     /// Allocates a block of memory of the given size.
     /// If the size is larger than the maximum size class, returns `None`.
     /// If the allocation fails, returns `None`.
@@ -178,7 +201,7 @@ impl Allocator {
         // - The slab index is guaranteed to be valid by `pop`.
         // - The size index is guaranteed to be valid by the caller.
         unsafe {
-            let slab_capacity = self.header.as_ref().slab_size / size_class(size_index);
+            let slab_capacity = self.base.header.as_ref().slab_size / size_class(size_index);
             self.slab_free_stack(slab_index).reset(slab_capacity as u16);
         };
         // SAFETY: The size index is guaranteed to be valid by caller.
@@ -282,7 +305,8 @@ impl Allocator {
     fn remote_free(&self, allocation_indexes: AllocationIndexes) {
         // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
         unsafe {
-            self.remote_free_list(allocation_indexes.slab_index)
+            self.base
+                .remote_free_list(allocation_indexes.slab_index)
                 .push(allocation_indexes.index_within_slab);
         }
     }
@@ -292,7 +316,7 @@ impl Allocator {
     /// # Safety
     /// - The `ptr` must be a valid pointer in the allocator's address space.
     pub unsafe fn offset(&self, ptr: NonNull<u8>) -> usize {
-        ptr.byte_offset_from(self.header) as usize
+        self.base.offset(ptr)
     }
 
     /// Return a ptr given a shareable offset - calculated by `offset`.
@@ -301,6 +325,99 @@ impl Allocator {
     ///
     /// - Caller must ensure the offset is valid for this allocator.
     pub unsafe fn ptr_from_offset(&self, offset: usize) -> NonNull<u8> {
+        self.base.ptr_from_offset(offset)
+    }
+
+    /// Find the slab index and index within the slab for a given offset.
+    fn find_allocation_indexes(&self, offset: usize) -> AllocationIndexes {
+        self.base.find_allocation_indexes(offset)
+    }
+}
+
+impl FreeOnlyAllocator {
+    /// Free a block of memory previously allocated by this allocator.
+    ///
+    /// # Safety
+    /// - The `ptr` must be a valid pointer to a block of memory allocated by this allocator.
+    /// - The `ptr` must not have been freed before.
+    pub unsafe fn free(&self, ptr: NonNull<u8>) {
+        // SAFETY: The pointer is assumed to be valid and allocated by this allocator.
+        let offset = unsafe { self.offset(ptr) };
+        self.free_offset(offset);
+    }
+
+    /// Free a block of memory previously allocated by this allocator.
+    ///
+    /// # Safety
+    /// - The `offset` must be a valid offset within the memory allocated by this allocator.
+    /// - The `offset` must not have been freed before.
+    pub unsafe fn free_offset(&self, offset: usize) {
+        let allocation_indexes = self.find_allocation_indexes(offset);
+        // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
+        unsafe {
+            self.base
+                .remote_free_list(allocation_indexes.slab_index)
+                .push(allocation_indexes.index_within_slab);
+        }
+    }
+
+    /// Find the offset given a pointer.
+    ///
+    /// # Safety
+    /// - The `ptr` must be a valid pointer in the allocator's address space.
+    pub unsafe fn offset(&self, ptr: NonNull<u8>) -> usize {
+        self.base.offset(ptr)
+    }
+
+    /// Return a ptr given a shareable offset - calculated by `offset`.
+    ///
+    /// # Safety
+    ///
+    /// - Caller must ensure the offset is valid for this allocator.
+    pub unsafe fn ptr_from_offset(&self, offset: usize) -> NonNull<u8> {
+        self.base.ptr_from_offset(offset)
+    }
+
+    /// Find the slab index and index within the slab for a given offset.
+    fn find_allocation_indexes(&self, offset: usize) -> AllocationIndexes {
+        self.base.find_allocation_indexes(offset)
+    }
+}
+
+impl AllocatorBase {
+    fn new(header: NonNull<Header>, file_size: usize) -> Self {
+        Self { header, file_size }
+    }
+
+    fn unmap(&self) {
+        #[cfg(test)]
+        {
+            // In tests, we do not mmap.
+            return;
+        }
+
+        #[allow(unreachable_code)]
+        // SAFETY: The header is guaranteed to be valid and initialized.
+        //         And outside of tests the allocator is mmaped.
+        unsafe {
+            libc::munmap(self.header.as_ptr() as *mut libc::c_void, self.file_size);
+        }
+    }
+
+    /// Find the offset given a pointer.
+    ///
+    /// # Safety
+    /// - The `ptr` must be a valid pointer in the allocator's address space.
+    unsafe fn offset(&self, ptr: NonNull<u8>) -> usize {
+        ptr.byte_offset_from(self.header) as usize
+    }
+
+    /// Return a ptr given a shareable offset - calculated by `offset`.
+    ///
+    /// # Safety
+    ///
+    /// - Caller must ensure the offset is valid for this allocator.
+    unsafe fn ptr_from_offset(&self, offset: usize) -> NonNull<u8> {
         unsafe { self.header.byte_add(offset) }.cast()
     }
 
@@ -345,109 +462,6 @@ impl Allocator {
         debug_assert!(slab_size.is_power_of_two());
         (offset_from_slab_start & (slab_size as usize - 1)) as u32
     }
-}
-
-impl Allocator {
-    /// Frees all items in remote free lists.
-    pub fn clean_remote_free_lists(&self) {
-        // Do partial slabs before full slabs, because the act of freeing within
-        // the full slabs may move them to partial slabs list, which would lead
-        // to us double-iterating.
-        for size_index in 0..NUM_SIZE_CLASSES {
-            // SAFETY: The size index is guaranteed to be valid by the loop.
-            let worker_local_list = unsafe { self.worker_local_list_partial(size_index) };
-            self.clean_remote_free_lists_for_list(worker_local_list);
-
-            // SAFETY: The size index is guaranteed to be valid by the loop.
-            let worker_local_list = unsafe { self.worker_local_list_full(size_index) };
-            self.clean_remote_free_lists_for_list(worker_local_list);
-        }
-    }
-
-    /// Frees all items in the remote free list for the given worker local list.
-    fn clean_remote_free_lists_for_list(&self, worker_local_list: WorkerLocalList) {
-        for slab_index in worker_local_list.iterate() {
-            // SAFETY: The slab index is guaranteed to be valid by the iterator.
-            let remote_free_list = unsafe { self.remote_free_list(slab_index) };
-            for index_within_slab in remote_free_list.drain() {
-                self.local_free(AllocationIndexes {
-                    slab_index,
-                    index_within_slab,
-                })
-            }
-        }
-    }
-}
-
-impl Allocator {
-    /// Returns a pointer to the free list elements in allocator.
-    fn free_list_elements(&self) -> NonNull<LinkedListNode> {
-        // SAFETY: The header is assumed to be valid and initialized.
-        let offset = unsafe { self.header.as_ref() }.free_list_elements_offset;
-        // SAFETY: The header is guaranteed to be valid and initialized.
-        unsafe { self.header.byte_add(offset as usize) }.cast()
-    }
-
-    /// Returns a `GlobalFreeList` to interact with the global free list.
-    fn global_free_list<'a>(&'a self) -> GlobalFreeList<'a> {
-        // SAFETY: The header is assumed to be valid and initialized.
-        let head = &unsafe { self.header.as_ref() }.global_free_list_head;
-        let list = self.free_list_elements();
-        // SAFETY:
-        // - `head` is a valid reference to the global free list head.
-        // - `list` is guaranteed to be valid wtih sufficient capacity.
-        unsafe { GlobalFreeList::new(head, list) }
-    }
-
-    /// Returns a `WorkerLocalList` for the current worker to interact with its
-    /// local free list of partially full slabs.
-    ///
-    /// # Safety
-    /// - The `size_index` must be a valid index for the size classes.
-    unsafe fn worker_local_list_partial<'a>(&'a self, size_index: usize) -> WorkerLocalList<'a> {
-        let head = &self.worker_head(size_index).partial;
-        let list = self.free_list_elements();
-
-        // SAFETY:
-        // - `head` is a valid reference to the worker's local list head.
-        // - `list` is guaranteed to be valid with sufficient capacity.
-        unsafe { WorkerLocalList::new(head, list) }
-    }
-
-    /// Returns a `WorkerLocalList` for the current worker to interact with its
-    /// local free list of full slabs.
-    ///
-    /// # Safety
-    /// - The `size_index` must be a valid index for the size classes.
-    unsafe fn worker_local_list_full<'a>(&'a self, size_index: usize) -> WorkerLocalList<'a> {
-        let head = &self.worker_head(size_index).full;
-        let list = self.free_list_elements();
-
-        // SAFETY:
-        // - `head` is a valid reference to the worker's local list head.
-        // - `list` is guaranteed to be valid with sufficient capacity.
-        unsafe { WorkerLocalList::new(head, list) }
-    }
-
-    fn worker_head(&self, size_index: usize) -> &WorkerLocalListPartialFullHeads {
-        // SAFETY: The header is assumed to be valid and initialized.
-        let all_workers_heads = unsafe {
-            self.header
-                .byte_add(offset_of!(Header, worker_local_list_heads))
-                .cast::<WorkerLocalListHeads>()
-        };
-        // SAFETY: The worker index is guaranteed to be valid by the constructor.
-        let worker_heads = unsafe { all_workers_heads.add(self.worker_index as usize) };
-        // SAFETY: The size index is guaranteed to be valid by the caller.
-        let worker_head = unsafe {
-            worker_heads
-                .cast::<WorkerLocalListPartialFullHeads>()
-                .add(size_index)
-                .as_ref()
-        };
-
-        worker_head
-    }
 
     /// Returns an instance of `RemoteFreeList` for the given slab.
     ///
@@ -486,31 +500,6 @@ impl Allocator {
         unsafe { slab_metas.add(slab_index as usize) }
     }
 
-    /// Return a mutable reference to a free stack for the given slab index.
-    ///
-    /// # Safety
-    /// - The `slab_index` must be a valid index for the slabs.
-    unsafe fn slab_free_stack<'a>(&'a self, slab_index: u32) -> FreeStack<'a> {
-        let (slab_size, offset) = {
-            // SAFETY: The header is assumed to be valid and initialized.
-            let header = unsafe { self.header.as_ref() };
-            (header.slab_size, header.slab_free_stacks_offset)
-        };
-        let free_stack_size = header::layout::single_free_stack_size(slab_size);
-
-        // SAFETY: The `FreeStack` layout is guaranteed to have enough room
-        // for top, capacity, and the trailing stack.
-        let mut top = unsafe {
-            self.header
-                .byte_add(offset as usize)
-                .byte_add(slab_index as usize * free_stack_size)
-                .cast()
-        };
-        let mut capacity = unsafe { top.add(1) };
-        let trailing_stack = unsafe { capacity.add(1) };
-        unsafe { FreeStack::new(top.as_mut(), capacity.as_mut(), trailing_stack) }
-    }
-
     /// Return a pointer to a slab.
     ///
     /// # Safety
@@ -530,6 +519,180 @@ impl Allocator {
                 .cast()
         }
     }
+
+    fn free_list_elements(&self) -> NonNull<LinkedListNode> {
+        // SAFETY: The header is assumed to be valid and initialized.
+        let offset = unsafe { self.header.as_ref() }.free_list_elements_offset;
+        // SAFETY: The header is guaranteed to be valid and initialized.
+        unsafe { self.header.byte_add(offset as usize) }.cast()
+    }
+}
+
+impl Allocator {
+    /// Frees all items in remote free lists.
+    pub fn clean_remote_free_lists(&self) {
+        // Do partial slabs before full slabs, because the act of freeing within
+        // the full slabs may move them to partial slabs list, which would lead
+        // to us double-iterating.
+        for size_index in 0..NUM_SIZE_CLASSES {
+            // SAFETY: The size index is guaranteed to be valid by the loop.
+            let worker_local_list = unsafe { self.worker_local_list_partial(size_index) };
+            self.clean_remote_free_lists_for_list(worker_local_list);
+
+            // SAFETY: The size index is guaranteed to be valid by the loop.
+            let worker_local_list = unsafe { self.worker_local_list_full(size_index) };
+            self.clean_remote_free_lists_for_list(worker_local_list);
+        }
+    }
+
+    /// Frees all items in the remote free list for the given worker local list.
+    fn clean_remote_free_lists_for_list(&self, worker_local_list: WorkerLocalList) {
+        for slab_index in worker_local_list.iterate() {
+            // SAFETY: The slab index is guaranteed to be valid by the iterator.
+            let remote_free_list = unsafe { self.remote_free_list(slab_index) };
+            for index_within_slab in remote_free_list.drain() {
+                self.local_free(AllocationIndexes {
+                    slab_index,
+                    index_within_slab,
+                })
+            }
+        }
+    }
+}
+
+impl Allocator {
+    /// Returns a pointer to the free list elements in allocator.
+    fn free_list_elements(&self) -> NonNull<LinkedListNode> {
+        self.base.free_list_elements()
+    }
+
+    /// Returns a `GlobalFreeList` to interact with the global free list.
+    fn global_free_list<'a>(&'a self) -> GlobalFreeList<'a> {
+        // SAFETY: The header is assumed to be valid and initialized.
+        let head = &unsafe { self.base.header.as_ref() }.global_free_list_head;
+        let list = self.free_list_elements();
+        // SAFETY:
+        // - `head` is a valid reference to the global free list head.
+        // - `list` is guaranteed to be valid wtih sufficient capacity.
+        unsafe { GlobalFreeList::new(head, list) }
+    }
+
+    /// Returns a `WorkerLocalList` for the current worker to interact with its
+    /// local free list of partially full slabs.
+    ///
+    /// # Safety
+    /// - The `size_index` must be a valid index for the size classes.
+    unsafe fn worker_local_list_partial<'a>(&'a self, size_index: usize) -> WorkerLocalList<'a> {
+        let head = &self.worker_head(size_index).partial;
+        let list = self.free_list_elements();
+
+        // SAFETY:
+        // - `head` is a valid reference to the worker's local list head.
+        // - `list` is guaranteed to be valid with sufficient capacity.
+        unsafe { WorkerLocalList::new(head, list) }
+    }
+
+    /// Returns a `WorkerLocalList` for the current worker to interact with its
+    /// local free list of full slabs.
+    ///
+    /// # Safety
+    /// - The `size_index` must be a valid index for the size classes.
+    unsafe fn worker_local_list_full<'a>(&'a self, size_index: usize) -> WorkerLocalList<'a> {
+        let head = &self.worker_head(size_index).full;
+        let list = self.free_list_elements();
+
+        // SAFETY:
+        // - `head` is a valid reference to the worker's local list head.
+        // - `list` is guaranteed to be valid with sufficient capacity.
+        unsafe { WorkerLocalList::new(head, list) }
+    }
+
+    fn worker_meta(&self) -> &WorkerLocalListHeads {
+        // SAFETY: The worker index is guaranteed to be valid by the constructor.
+        unsafe { worker_meta_ptr(self.base.header, self.worker_index).as_ref() }
+    }
+
+    fn worker_head(&self, size_index: usize) -> &WorkerLocalListPartialFullHeads {
+        // SAFETY: The size index is guaranteed to be valid by the caller.
+        &self.worker_meta().heads[size_index]
+    }
+
+    /// Returns an instance of `RemoteFreeList` for the given slab.
+    ///
+    /// # Safety
+    /// - `slab_index` must be a valid slab index.
+    unsafe fn remote_free_list<'a>(&'a self, slab_index: u32) -> RemoteFreeList<'a> {
+        self.base.remote_free_list(slab_index)
+    }
+
+    /// Returns a pointer to the slab meta for the given slab index.
+    ///
+    /// # Safety
+    /// - The `slab_index` must be a valid index for the slabs.
+    unsafe fn slab_meta(&self, slab_index: u32) -> NonNull<SlabMeta> {
+        self.base.slab_meta(slab_index)
+    }
+
+    /// Return a mutable reference to a free stack for the given slab index.
+    ///
+    /// # Safety
+    /// - The `slab_index` must be a valid index for the slabs.
+    unsafe fn slab_free_stack<'a>(&'a self, slab_index: u32) -> FreeStack<'a> {
+        let (slab_size, offset) = {
+            // SAFETY: The header is assumed to be valid and initialized.
+            let header = unsafe { self.base.header.as_ref() };
+            (header.slab_size, header.slab_free_stacks_offset)
+        };
+        let free_stack_size = header::layout::single_free_stack_size(slab_size);
+
+        // SAFETY: The `FreeStack` layout is guaranteed to have enough room
+        // for top, capacity, and the trailing stack.
+        let mut top = unsafe {
+            self.base
+                .header
+                .byte_add(offset as usize)
+                .byte_add(slab_index as usize * free_stack_size)
+                .cast()
+        };
+        let mut capacity = unsafe { top.add(1) };
+        let trailing_stack = unsafe { capacity.add(1) };
+        unsafe { FreeStack::new(top.as_mut(), capacity.as_mut(), trailing_stack) }
+    }
+
+    /// Return a pointer to a slab.
+    ///
+    /// # Safety
+    /// - The `slab_index` must be a valid index for the slabs.
+    unsafe fn slab(&self, slab_index: u32) -> NonNull<u8> {
+        self.base.slab(slab_index)
+    }
+}
+
+unsafe fn worker_meta_ptr(
+    header: NonNull<Header>,
+    worker_index: u32,
+) -> NonNull<WorkerLocalListHeads> {
+    let all_workers_heads = unsafe {
+        header
+            .byte_add(offset_of!(Header, worker_local_list_heads))
+            .cast::<WorkerLocalListHeads>()
+    };
+    // SAFETY: The caller guarantees the worker index is in range.
+    unsafe { all_workers_heads.add(worker_index as usize) }
+}
+
+unsafe fn claim_any_worker_index(header: NonNull<Header>) -> Option<u32> {
+    let num_workers = unsafe { header.as_ref() }.num_workers;
+    for worker_index in 0..num_workers {
+        let claimed = unsafe { &worker_meta_ptr(header, worker_index).as_ref().claimed };
+        if claimed
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return Some(worker_index);
+        }
+    }
+    None
 }
 
 struct AllocationIndexes {
@@ -558,15 +721,13 @@ mod tests {
             .collect::<Vec<_>>()
     }
 
-    fn initialize_for_test(
-        buffer: *mut u8,
-        slab_size: u32,
-        num_workers: u32,
-        worker_index: u32,
-    ) -> Allocator {
+    fn initialize_for_test(buffer: *mut u8, slab_size: u32, num_workers: u32) -> Allocator {
         let file_size = TEST_BUFFER_SIZE;
 
-        let layout = layout::offsets(file_size, slab_size, num_workers);
+        let slab_size_usize = slab_size as usize;
+        let num_slabs_upperbound = (file_size / slab_size_usize).saturating_sub(1) as u32;
+        let mut layout = layout::layout_for_num_slabs(num_workers, slab_size, num_slabs_upperbound);
+        layout.num_slabs = ((file_size - layout.slabs_offset as usize) / slab_size_usize) as u32;
 
         let header = NonNull::new(buffer as *mut Header).unwrap();
         // SAFETY: The header is valid for any byte pattern, and we are initializing it with the
@@ -575,14 +736,14 @@ mod tests {
             initialize::allocator(header, slab_size, num_workers, layout);
         }
 
-        // SAFETY: The header/allocator memory is initialized.
-        unsafe { Allocator::new(header, file_size, worker_index) }.unwrap()
+        let worker_index = unsafe { claim_any_worker_index(header) }.unwrap();
+        Allocator::new(header, file_size, worker_index).unwrap()
     }
 
-    fn join_for_tests(buffer: *mut u8, worker_index: u32) -> Allocator {
+    fn join_for_tests(buffer: *mut u8) -> Allocator {
         let header = NonNull::new(buffer as *mut Header).unwrap();
-        // SAFETY: The header is valid if joining an existing allocator.
-        unsafe { Allocator::new(header, TEST_BUFFER_SIZE, worker_index) }.unwrap()
+        let worker_index = unsafe { claim_any_worker_index(header) }.unwrap();
+        Allocator::new(header, TEST_BUFFER_SIZE, worker_index).unwrap()
     }
 
     #[test]
@@ -590,13 +751,7 @@ mod tests {
         let mut buffer = test_buffer();
         let slab_size = 65536; // 64 KiB
         let num_workers = 4;
-        let worker_index = 0;
-        let allocator = initialize_for_test(
-            buffer.as_mut_ptr().cast(),
-            slab_size,
-            num_workers,
-            worker_index,
-        );
+        let allocator = initialize_for_test(buffer.as_mut_ptr().cast(), slab_size, num_workers);
 
         let mut allocations = vec![];
 
@@ -637,13 +792,7 @@ mod tests {
         let mut buffer = test_buffer();
         let slab_size = 65536; // 64 KiB
         let num_workers = 4;
-        let worker_index = 0;
-        let allocator = initialize_for_test(
-            buffer.as_mut_ptr().cast(),
-            slab_size,
-            num_workers,
-            worker_index,
-        );
+        let allocator = initialize_for_test(buffer.as_mut_ptr().cast(), slab_size, num_workers);
 
         let allocation_size = 2048;
         let size_index = size_class_index(allocation_size).unwrap();
@@ -727,15 +876,9 @@ mod tests {
         let mut buffer = test_buffer();
         let slab_size = 65536; // 64 KiB
         let num_workers = 4;
-        let worker_index = 0;
-        let allocator = initialize_for_test(
-            buffer.as_mut_ptr().cast(),
-            slab_size,
-            num_workers,
-            worker_index,
-        );
+        let allocator = initialize_for_test(buffer.as_mut_ptr().cast(), slab_size, num_workers);
 
-        let num_slabs = unsafe { allocator.header.as_ref() }.num_slabs;
+        let num_slabs = unsafe { allocator.base.header.as_ref() }.num_slabs;
         for index in 0..num_slabs {
             let slab_index = unsafe { allocator.take_slab(0) }.unwrap();
             assert_eq!(slab_index, index);
@@ -750,9 +893,8 @@ mod tests {
         let slab_size = 65536; // 64 KiB
         let num_workers = 4;
 
-        let allocator_0 =
-            initialize_for_test(buffer.as_mut_ptr().cast(), slab_size, num_workers, 0);
-        let allocator_1 = join_for_tests(buffer.as_mut_ptr().cast(), 1);
+        let allocator_0 = initialize_for_test(buffer.as_mut_ptr().cast(), slab_size, num_workers);
+        let allocator_1 = join_for_tests(buffer.as_mut_ptr().cast());
 
         let allocation_size = 2048;
         let size_index = size_class_index(allocation_size).unwrap();
@@ -799,5 +941,39 @@ mod tests {
             allocator_0.find_allocation_indexes(allocator_0.offset(same_slab_allocation))
         };
         assert_eq!(allocation_indexes.slab_index, slab_index);
+    }
+
+    #[test]
+    fn test_free_only_allocator() {
+        let mut buffer = test_buffer();
+        let slab_size = 65536; // 64 KiB
+        let num_workers = 4;
+        let allocator = initialize_for_test(buffer.as_mut_ptr().cast(), slab_size, num_workers);
+        let free_only_allocator = FreeOnlyAllocator {
+            base: AllocatorBase {
+                header: allocator.base.header,
+                file_size: TEST_BUFFER_CAPACITY,
+            },
+        };
+
+        let allocation_size = 2048;
+        let allocation = allocator.allocate(allocation_size).unwrap();
+
+        let allocation_indexes =
+            unsafe { allocator.find_allocation_indexes(allocator.offset(allocation)) };
+
+        // SAFETY: allocation is a valid pointer allocated by the allocator.
+        unsafe {
+            free_only_allocator.free(allocation);
+        }
+
+        // Index should be in the remote free list for the slab.
+        assert_eq!(
+            unsafe { allocator.remote_free_list(allocation_indexes.slab_index) }
+                .iterate()
+                .next()
+                .unwrap(),
+            allocation_indexes.index_within_slab
+        );
     }
 }
