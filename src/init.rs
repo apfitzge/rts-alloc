@@ -77,14 +77,16 @@ fn join_inner(mmap: *mut c_void, file_size: usize) -> Result<(NonNull<Header>, u
         // - The mmap is non-null and `file_size >= size_of::<Header>()`.
         // - Header is `#[repr(C)]` and valid for any bit pattern.
         let header = unsafe { header.as_ref() };
-        let actual_version = header.version.load(Ordering::SeqCst);
-        if actual_version != crate::header::VERSION {
+        if header.magic.load(Ordering::Acquire) != crate::header::MAGIC {
+            return Err(Error::InvalidMagic);
+        }
+        if header.version != crate::header::VERSION {
             return Err(Error::InvalidVersion {
                 expected: crate::header::VERSION,
-                actual: actual_version,
+                actual: header.version,
             });
         }
-        if header.magic != crate::header::MAGIC || header.num_workers == 0 {
+        if header.num_workers == 0 {
             return Err(Error::InvalidHeader);
         }
         verify_slab_size(header.slab_size)?;
@@ -92,7 +94,7 @@ fn join_inner(mmap: *mut c_void, file_size: usize) -> Result<(NonNull<Header>, u
         let limits = layout::max_workers(file_size, header.slab_size, header.num_workers)
             .ok_or(Error::InvalidHeader)?;
         if limits.max_workers != header.num_workers {
-            return Err(Error::InvalidHeader);
+            return Err(Error::HeaderMismatch);
         }
         let expected_layout =
             layout::layout_for_num_slabs(header.num_workers, header.slab_size, limits.usable_slabs);
@@ -103,7 +105,7 @@ fn join_inner(mmap: *mut c_void, file_size: usize) -> Result<(NonNull<Header>, u
             || header.slab_free_stacks_offset != expected_layout.slab_free_stacks_offset
             || header.slabs_offset != expected_layout.slabs_offset
         {
-            return Err(Error::InvalidHeader);
+            return Err(Error::HeaderMismatch);
         }
     }
 
@@ -187,10 +189,10 @@ pub mod initialize {
             crate::global_free_list::pack_index(0, NULL_U32),
             Ordering::Release,
         );
-        header.magic = crate::header::MAGIC;
-        header
-            .version
-            .store(crate::header::VERSION, Ordering::SeqCst);
+        header.version = crate::header::VERSION;
+        // NB: This ensures all the above non-atomic writes will be synchronized with
+        //     `join()`'s Acquire load.
+        header.magic.store(crate::header::MAGIC, Ordering::Release);
     }
 
     /// # Safety
