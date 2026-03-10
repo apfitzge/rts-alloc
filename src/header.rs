@@ -7,6 +7,7 @@ pub const VERSION_MAJOR: u16 = 2;
 pub const VERSION_PATCH: u16 = 0;
 pub const VERSION: u32 = (VERSION_MAJOR as u32) << 16 | VERSION_PATCH as u32;
 
+#[repr(C)]
 pub struct WorkerLocalListPartialFullHeads {
     pub partial: AtomicU32,
     pub full: AtomicU32,
