@@ -3,7 +3,7 @@ use crate::global_free_list::GlobalFreeList;
 use crate::header::{self, WorkerLocalListHeads, WorkerLocalListPartialFullHeads};
 use crate::linked_list_node::LinkedListNode;
 use crate::remote_free_list::RemoteFreeList;
-use crate::size_classes::{size_class, NUM_SIZE_CLASSES};
+use crate::size_classes::{size_class, size_class_unchecked, NUM_SIZE_CLASSES};
 use crate::slab_meta::SlabMeta;
 use crate::sync::Ordering;
 use crate::worker_local_list::WorkerLocalList;
@@ -211,7 +211,7 @@ impl Allocator {
             .or_else(|| self.take_slab(size_index))
     }
 
-    /// Attempt to allocate meomry within a slab.
+    /// Attempt to allocate memory within a slab.
     /// If the slab is full or the allocation otherwise fails, returns `None`.
     ///
     /// # Safety
@@ -247,7 +247,8 @@ impl Allocator {
         maybe_index_within_slab.map(|index_within_slab| {
             // SAFETY: The `slab_index` is guaranteed to be valid by the caller.
             let slab = unsafe { self.slab(slab_index) };
-            let size = size_class(size_index);
+            // SAFETY: The `size_index` is guaranteed to be valid by the caller.
+            let size = unsafe { size_class_unchecked(size_index) };
             self.worker_meta()
                 .outstanding_allocation_bytes
                 .fetch_add(size as u64, Ordering::Relaxed);
@@ -270,7 +271,7 @@ impl Allocator {
         // - The slab index is guaranteed to be valid by `pop`.
         // - The size index is guaranteed to be valid by the caller.
         unsafe {
-            let slab_capacity = self.base.layout.slab_size / size_class(size_index);
+            let slab_capacity = self.base.layout.slab_size / size_class_unchecked(size_index);
             self.slab_free_stack(slab_index).reset(slab_capacity as u16);
         };
         // SAFETY: The size index is guaranteed to be valid by caller.
@@ -589,10 +590,21 @@ impl AllocatorBase {
         }
     }
 
-    fn free_list_elements(&self) -> NonNull<LinkedListNode> {
+    fn free_list_elements(&self) -> &[LinkedListNode] {
         let offset = self.layout.free_list_elements_offset;
-        // SAFETY: The header is guaranteed to be valid and initialized.
-        unsafe { self.header().byte_add(offset as usize) }.cast()
+        // SAFETY:
+        // - The header is guaranteed to be valid and initialized.
+        // - The pointer is aligned for `LinkedListNode` (guaranteed by layout).
+        // - The pointer is valid for `num_slabs` contiguous `LinkedListNode` elements.
+        unsafe {
+            core::slice::from_raw_parts(
+                self.header()
+                    .byte_add(offset as usize)
+                    .cast::<LinkedListNode>()
+                    .as_ptr(),
+                self.layout.num_slabs as usize,
+            )
+        }
     }
 }
 
@@ -647,20 +659,18 @@ impl Allocator {
 }
 
 impl Allocator {
-    /// Returns a pointer to the free list elements in allocator.
-    fn free_list_elements(&self) -> NonNull<LinkedListNode> {
+    /// Returns a slice of the free list elements in allocator.
+    fn free_list_elements(&self) -> &[LinkedListNode] {
         self.base.free_list_elements()
     }
 
     /// Returns a `GlobalFreeList` to interact with the global free list.
     fn global_free_list<'a>(&'a self) -> GlobalFreeList<'a> {
         // SAFETY: The header is assumed to be valid and initialized.
-        let head = &unsafe { self.base.header().as_ref() }.global_free_list_head;
+        let header = unsafe { self.base.header().as_ref() };
+        let head = &header.global_free_list_head;
         let list = self.free_list_elements();
-        // SAFETY:
-        // - `head` is a valid reference to the global free list head.
-        // - `list` is guaranteed to be valid wtih sufficient capacity.
-        unsafe { GlobalFreeList::new(head, list) }
+        GlobalFreeList::new(head, list)
     }
 
     /// Returns a `WorkerLocalList` for the current worker to interact with its
@@ -671,11 +681,7 @@ impl Allocator {
     unsafe fn worker_local_list_partial<'a>(&'a self, size_index: usize) -> WorkerLocalList<'a> {
         let head = &self.worker_head(size_index).partial;
         let list = self.free_list_elements();
-
-        // SAFETY:
-        // - `head` is a valid reference to the worker's local list head.
-        // - `list` is guaranteed to be valid with sufficient capacity.
-        unsafe { WorkerLocalList::new(head, list) }
+        WorkerLocalList::new(head, list)
     }
 
     /// Returns a `WorkerLocalList` for the current worker to interact with its
@@ -686,11 +692,7 @@ impl Allocator {
     unsafe fn worker_local_list_full<'a>(&'a self, size_index: usize) -> WorkerLocalList<'a> {
         let head = &self.worker_head(size_index).full;
         let list = self.free_list_elements();
-
-        // SAFETY:
-        // - `head` is a valid reference to the worker's local list head.
-        // - `list` is guaranteed to be valid with sufficient capacity.
-        unsafe { WorkerLocalList::new(head, list) }
+        WorkerLocalList::new(head, list)
     }
 
     fn worker_meta(&self) -> &WorkerLocalListHeads {
@@ -699,7 +701,6 @@ impl Allocator {
     }
 
     fn worker_head(&self, size_index: usize) -> &WorkerLocalListPartialFullHeads {
-        // SAFETY: The size index is guaranteed to be valid by the caller.
         &self.worker_meta().heads[size_index]
     }
 
