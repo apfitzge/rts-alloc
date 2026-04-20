@@ -297,7 +297,8 @@ impl Allocator {
     /// Free a block of memory previously allocated by this allocator.
     ///
     /// # Safety
-    /// - The `offset` must be a valid offset within the memory allocated by this allocator.
+    /// - The `offset` must be a valid offset to a block of memory allocator by this allocator,
+    ///   i.e. an offset returned by [`Self::offset`].
     /// - The `offset` must not have been freed before.
     pub unsafe fn free_offset(&self, offset: usize) {
         let allocation_indexes = self.find_allocation_indexes(offset);
@@ -418,7 +419,8 @@ impl FreeOnlyAllocator {
     /// Free a block of memory previously allocated by this allocator.
     ///
     /// # Safety
-    /// - The `offset` must be a valid offset within the memory allocated by this allocator.
+    /// - The `offset` must be a valid offset to a block of memory allocator by this allocator,
+    ///   i.e. an offset returned by [`Self::offset`].
     /// - The `offset` must not have been freed before.
     pub unsafe fn free_offset(&self, offset: usize) {
         let allocation_indexes = self.find_allocation_indexes(offset);
