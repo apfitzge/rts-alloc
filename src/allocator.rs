@@ -188,6 +188,10 @@ impl Allocator {
     /// If the size is larger than the maximum size class, returns `None`.
     /// If the allocation fails, returns `None`.
     pub fn allocate(&self, size: u32) -> Option<NonNull<u8>> {
+        // Explicitly reject zero-sized allocations.
+        if size == 0 {
+            return None;
+        }
         let size_index = size_class_index(size)?;
 
         // SAFETY: `size_index` is guaranteed to be valid by `size_class_index`.
@@ -857,6 +861,7 @@ mod tests {
         let mut allocations = vec![];
         let mut total_allocated_bytes = 0u64;
 
+        assert!(allocator.allocate(0).is_none());
         for class_size in SIZE_CLASSES[..NUM_SIZE_CLASSES - 1].iter() {
             for size in [class_size - 1, *class_size, class_size + 1] {
                 allocations.push(allocator.allocate(size).unwrap());
