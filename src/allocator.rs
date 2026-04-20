@@ -297,7 +297,7 @@ impl Allocator {
     /// Free a block of memory previously allocated by this allocator.
     ///
     /// # Safety
-    /// - The `offset` must be a valid offset to a block of memory allocator by this allocator,
+    /// - The `offset` must be a valid offset to a block of memory allocated by this allocator,
     ///   i.e. an offset returned by [`Self::offset`].
     /// - The `offset` must not have been freed before.
     pub unsafe fn free_offset(&self, offset: usize) {
@@ -419,7 +419,7 @@ impl FreeOnlyAllocator {
     /// Free a block of memory previously allocated by this allocator.
     ///
     /// # Safety
-    /// - The `offset` must be a valid offset to a block of memory allocator by this allocator,
+    /// - The `offset` must be a valid offset to a block of memory allocated by this allocator,
     ///   i.e. an offset returned by [`Self::offset`].
     /// - The `offset` must not have been freed before.
     pub unsafe fn free_offset(&self, offset: usize) {
