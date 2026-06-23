@@ -1,4 +1,3 @@
-pub type CacheAlignedU16 = CacheAligned<crate::sync::AtomicU16>;
 pub type CacheAlignedU64 = CacheAligned<crate::sync::AtomicU64>;
 
 #[repr(C, align(64))]

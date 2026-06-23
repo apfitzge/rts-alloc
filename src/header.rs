@@ -1,6 +1,6 @@
 use crate::cache_aligned::CacheAlignedU64;
 use crate::size_classes::NUM_SIZE_CLASSES;
-use crate::sync::{AtomicU32, AtomicU64, AtomicU8};
+use crate::sync::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize};
 
 /// Unique identifier for rts-alloc in shared memory.
 pub const MAGIC: u64 = u64::from_be_bytes(*b"\0rtsaloc");
@@ -18,6 +18,7 @@ pub struct WorkerLocalListPartialFullHeads {
 pub struct WorkerLocalListHeads {
     pub claimed: AtomicU8,
     pub outstanding_allocation_bytes: AtomicU64,
+    pub remote_free_head: AtomicUsize,
     pub heads: [WorkerLocalListPartialFullHeads; NUM_SIZE_CLASSES],
 }
 
@@ -67,7 +68,10 @@ pub struct Header {
 //     - each worker has its own set of heads.
 //     - each worker has a partial and full head for each size class.
 //     - the heads store indexes into the free list elements.
-//     - NULL_U32 is used to indicate a null pointer in the linked list.
+//     - each worker also has a remote-free head that tracks allocation offsets
+//       pending cleanup by that worker.
+//     - NULL_U32 is used for slab-list heads; NULL_USIZE is used for the
+//       remote-free offset head.
 //
 // free_list_elements:
 //     - list of free list elements, one per slab.
@@ -269,16 +273,16 @@ mod tests {
         assert_eq!(offset, 480);
 
         offset = layout::pad_for_slab_meta(offset);
-        assert_eq!(offset, 512);
+        assert_eq!(offset, 480);
 
         offset += layout::slab_meta_size(num_slabs);
-        assert_eq!(offset, 1536);
+        assert_eq!(offset, 608);
 
         offset = layout::pad_for_slab_free_stacks(offset);
-        assert_eq!(offset, 1536);
+        assert_eq!(offset, 608);
 
         offset += layout::free_stacks_size(num_slabs, slab_size);
-        assert_eq!(offset, 1824);
+        assert_eq!(offset, 896);
 
         offset = layout::pad_for_slabs(offset, slab_size);
         assert_eq!(offset, 4096);

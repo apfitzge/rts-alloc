@@ -93,6 +93,7 @@ impl<'a> WorkerLocalList<'a> {
     ///
     /// The linked-list next pointers are read from shared memory and
     /// bounds-checked against the list to guard against cross-process corruption.
+    #[cfg(test)]
     pub fn iterate(&self) -> impl Iterator<Item = u32> + '_ {
         let mut current_head = self.head.load(Ordering::Acquire);
         core::iter::from_fn(move || {

@@ -4,7 +4,7 @@ use crate::{
         layout::{self, AllocatorLayout},
         Header, WorkerLocalListHeads,
     },
-    index::NULL_U32,
+    index::{NULL_U32, NULL_USIZE},
     linked_list_node::LinkedListNode,
     size_classes::{MAX_SIZE, MIN_SIZE},
 };
@@ -222,6 +222,9 @@ pub mod initialize {
             worker_head
                 .outstanding_allocation_bytes
                 .store(0, Ordering::Release);
+            worker_head
+                .remote_free_head
+                .store(NULL_USIZE, Ordering::Release);
             for worker_partial_full in worker_head.heads.iter_mut() {
                 worker_partial_full
                     .partial

@@ -2,12 +2,16 @@ use crate::free_stack::FreeStack;
 use crate::global_free_list::GlobalFreeList;
 use crate::header::{self, WorkerLocalListHeads, WorkerLocalListPartialFullHeads};
 use crate::linked_list_node::LinkedListNode;
-use crate::remote_free_list::RemoteFreeList;
-use crate::size_classes::{size_class, size_class_unchecked, NUM_SIZE_CLASSES};
+use crate::size_classes::{size_class, size_class_unchecked};
 use crate::slab_meta::SlabMeta;
-use crate::sync::Ordering;
+use crate::sync::{AtomicUsize, Ordering};
 use crate::worker_local_list::WorkerLocalList;
-use crate::{error::Error, header::Header, size_classes::size_class_index};
+use crate::{
+    error::Error,
+    header::Header,
+    index::{NULL_U32, NULL_USIZE},
+    size_classes::size_class_index,
+};
 use core::mem::offset_of;
 use core::ptr::NonNull;
 use std::fs::File;
@@ -320,7 +324,7 @@ impl Allocator {
                 .fetch_sub(size as u64, Ordering::Relaxed);
             self.local_free_with_size_index(allocation_indexes, size_index);
         } else {
-            self.remote_free(allocation_indexes);
+            self.remote_free(offset, allocation_indexes.slab_index);
         }
     }
 
@@ -366,6 +370,13 @@ impl Allocator {
                 }
                 // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
                 unsafe {
+                    self.slab_meta(allocation_indexes.slab_index)
+                        .as_ref()
+                        .assigned_worker
+                        .store(NULL_U32, Ordering::Release);
+                }
+                // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
+                unsafe {
                     self.global_free_list().push(allocation_indexes.slab_index);
                 }
             }
@@ -376,13 +387,8 @@ impl Allocator {
         }
     }
 
-    fn remote_free(&self, allocation_indexes: AllocationIndexes) {
-        // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
-        unsafe {
-            self.base
-                .remote_free_list(allocation_indexes.slab_index)
-                .push(allocation_indexes.index_within_slab);
-        }
+    fn remote_free(&self, offset: usize, slab_index: u32) {
+        self.base.remote_free(offset, slab_index);
     }
 
     /// Find the offset given a pointer.
@@ -428,12 +434,7 @@ impl FreeOnlyAllocator {
     /// - The `offset` must not have been freed before.
     pub unsafe fn free_offset(&self, offset: usize) {
         let allocation_indexes = self.find_allocation_indexes(offset);
-        // SAFETY: The allocation indexes are guaranteed to be valid by the caller.
-        unsafe {
-            self.base
-                .remote_free_list(allocation_indexes.slab_index)
-                .push(allocation_indexes.index_within_slab);
-        }
+        self.base.remote_free(offset, allocation_indexes.slab_index);
     }
 
     /// Find the offset given a pointer.
@@ -538,6 +539,39 @@ impl AllocatorBase {
         }
     }
 
+    fn remote_free(&self, offset: usize, slab_index: u32) {
+        debug_assert_ne!(offset, NULL_USIZE);
+
+        // SAFETY: The slab index is guaranteed to be valid by the caller.
+        let slab_meta = unsafe { self.slab_meta(slab_index).as_ref() };
+        let worker_index = slab_meta.assigned_worker.load(Ordering::Acquire);
+        debug_assert!(worker_index < self.layout.num_workers);
+        if worker_index >= self.layout.num_workers {
+            return;
+        }
+
+        // SAFETY: The worker index is checked against the layout above.
+        let worker_meta = unsafe { worker_meta_ptr(self.header(), worker_index).as_ref() };
+        let remote_free_head = &worker_meta.remote_free_head;
+        // SAFETY: The offset is guaranteed to refer to the allocation being freed.
+        let remote_free_node: &AtomicUsize =
+            unsafe { self.ptr_from_offset(offset).cast().as_ref() };
+
+        let mut current_head = remote_free_head.load(Ordering::Acquire);
+        loop {
+            remote_free_node.store(current_head, Ordering::Release);
+            match remote_free_head.compare_exchange(
+                current_head,
+                offset,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(next_head) => current_head = next_head,
+            }
+        }
+    }
+
     /// Return offset within a slab.
     ///
     /// # Safety
@@ -545,28 +579,6 @@ impl AllocatorBase {
     const unsafe fn offset_within_slab(slab_size: u32, offset_from_slab_start: usize) -> u32 {
         debug_assert!(slab_size.is_power_of_two());
         (offset_from_slab_start & (slab_size as usize - 1)) as u32
-    }
-
-    /// Returns an instance of `RemoteFreeList` for the given slab.
-    ///
-    /// # Safety
-    /// - `slab_index` must be a valid slab index.
-    unsafe fn remote_free_list<'a>(&'a self, slab_index: u32) -> RemoteFreeList<'a> {
-        let (head, slab_item_size) = {
-            // SAFETY: The slab index is guaranteed to be valid by the caller.
-            let slab_meta = unsafe { self.slab_meta(slab_index).as_ref() };
-            let size_class = size_class(slab_meta.size_class_index.load(Ordering::Acquire));
-            (&slab_meta.remote_free_stack_head, size_class)
-        };
-        // SAFETY: The slab index is guaranteed to be valid by the caller.
-        let slab = unsafe { self.slab(slab_index) };
-
-        // SAFETY:
-        // - `slab_item_size` must be a valid size AND currently assigned to the slab.
-        // - `head` must be a valid reference to a `CacheAlignedU16
-        //   that is the head of the remote free list.
-        // - `slab` must be a valid pointer to the beginning of the slab.
-        unsafe { RemoteFreeList::new(slab_item_size, head, slab) }
     }
 
     /// Returns a pointer to the slab meta for the given slab index.
@@ -621,45 +633,26 @@ impl Allocator {
             .load(Ordering::Relaxed)
     }
 
-    /// Frees all items in remote free lists.
-    pub fn clean_remote_free_lists(&self) {
-        // Do partial slabs before full slabs, because the act of freeing within
-        // the full slabs may move them to partial slabs list, which would lead
-        // to us double-iterating.
-        for size_index in 0..NUM_SIZE_CLASSES {
-            // SAFETY: The size index is guaranteed to be valid by the loop.
-            let worker_local_list = unsafe { self.worker_local_list_partial(size_index) };
-            self.clean_remote_free_lists_for_list(worker_local_list);
+    /// Frees all remotely freed items queued for this worker.
+    pub fn clean_remote_frees(&self) {
+        let mut offset = self
+            .worker_meta()
+            .remote_free_head
+            .swap(NULL_USIZE, Ordering::AcqRel);
 
-            // SAFETY: The size index is guaranteed to be valid by the loop.
-            let worker_local_list = unsafe { self.worker_local_list_full(size_index) };
-            self.clean_remote_free_lists_for_list(worker_local_list);
-        }
-    }
-
-    /// Frees all items in the remote free list for the given worker local list.
-    fn clean_remote_free_lists_for_list(&self, worker_local_list: WorkerLocalList) {
-        for slab_index in worker_local_list.iterate() {
-            // SAFETY: Slab indices come from worker-local lists and are valid.
-            let (size_index, size) = unsafe { self.slab_size_class(slab_index) };
-            let mut drained_items = 0u64;
-            // SAFETY: The slab index is guaranteed to be valid by the iterator.
-            let remote_free_list = unsafe { self.remote_free_list(slab_index) };
-            for index_within_slab in remote_free_list.drain() {
-                self.local_free_with_size_index(
-                    AllocationIndexes {
-                        slab_index,
-                        index_within_slab,
-                    },
-                    size_index,
-                );
-                drained_items += 1;
-            }
-            if drained_items != 0 {
-                self.worker_meta()
-                    .outstanding_allocation_bytes
-                    .fetch_sub(drained_items * size as u64, Ordering::Relaxed);
-            }
+        while offset != NULL_USIZE {
+            // SAFETY: Remote free entries are allocation offsets pushed by `remote_free`.
+            let remote_free_node: &AtomicUsize =
+                unsafe { self.base.ptr_from_offset(offset).cast().as_ref() };
+            let next_offset = remote_free_node.load(Ordering::Acquire);
+            let allocation_indexes = self.find_allocation_indexes(offset);
+            // SAFETY: Allocation indexes come from a valid allocation offset.
+            let (size_index, size) = unsafe { self.slab_size_class(allocation_indexes.slab_index) };
+            self.local_free_with_size_index(allocation_indexes, size_index);
+            self.worker_meta()
+                .outstanding_allocation_bytes
+                .fetch_sub(size as u64, Ordering::Relaxed);
+            offset = next_offset;
         }
     }
 }
@@ -720,14 +713,6 @@ impl Allocator {
             .load(Ordering::Relaxed);
         let size = size_class(size_index);
         (size_index, size)
-    }
-
-    /// Returns an instance of `RemoteFreeList` for the given slab.
-    ///
-    /// # Safety
-    /// - `slab_index` must be a valid slab index.
-    unsafe fn remote_free_list<'a>(&'a self, slab_index: u32) -> RemoteFreeList<'a> {
-        self.base.remote_free_list(slab_index)
     }
 
     /// Returns a pointer to the slab meta for the given slab index.
@@ -803,7 +788,7 @@ struct AllocationIndexes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::size_classes::{MAX_SIZE, SIZE_CLASSES};
+    use crate::size_classes::{MAX_SIZE, NUM_SIZE_CLASSES, SIZE_CLASSES};
 
     const TEST_BUFFER_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
 
@@ -851,6 +836,21 @@ mod tests {
         let allocator =
             unsafe { Allocator::create(&file, TEST_BUFFER_SIZE, num_workers, slab_size).unwrap() };
         (file, allocator)
+    }
+
+    fn remote_free_stack(allocator: &Allocator) -> Vec<usize> {
+        let mut free_offsets = Vec::new();
+        let mut offset = allocator
+            .worker_meta()
+            .remote_free_head
+            .load(Ordering::Acquire);
+        while offset != NULL_USIZE {
+            free_offsets.push(offset);
+            let remote_free_node: &AtomicUsize =
+                unsafe { allocator.base.ptr_from_offset(offset).cast().as_ref() };
+            offset = remote_free_node.load(Ordering::Acquire);
+        }
+        free_offsets
     }
 
     #[test]
@@ -1031,17 +1031,21 @@ mod tests {
             worker_local_list.head().unwrap()
         };
 
-        // The slab's remote list should be empty.
-        let remote_free_list = unsafe { allocator_0.remote_free_list(slab_index) };
-        assert!(remote_free_list.iterate().next().is_none());
+        assert_eq!(remote_free_stack(&allocator_0), Vec::<usize>::new());
 
-        // Free the allocations to the remote free list.
+        // Free the allocations to the remote free stack.
+        let mut allocation_offsets = Vec::new();
         for ptr in allocations {
             unsafe {
                 let offset = allocator_0.offset(ptr);
+                allocation_offsets.push(offset);
                 allocator_1.free_offset(offset);
             }
         }
+        assert_eq!(
+            remote_free_stack(&allocator_0),
+            allocation_offsets.iter().rev().copied().collect::<Vec<_>>()
+        );
         assert_eq!(
             allocator_0.outstanding_allocation_bytes(),
             allocations_per_slab as u64 * allocation_size as u64
@@ -1056,7 +1060,8 @@ mod tests {
         unsafe { allocator_0.free(different_slab_allocation) };
 
         // If we clean the remote free lists, the next allocation should succeed in the same slab.
-        allocator_0.clean_remote_free_lists();
+        allocator_0.clean_remote_frees();
+        assert_eq!(remote_free_stack(&allocator_0), Vec::<usize>::new());
         assert_eq!(allocator_0.outstanding_allocation_bytes(), 0);
         let same_slab_allocation = allocator_0.allocate(allocation_size).unwrap();
         let allocation_indexes = unsafe {
@@ -1164,22 +1169,12 @@ mod tests {
         let allocation_size = 2048;
         let allocation = allocator.allocate(allocation_size).unwrap();
 
-        let allocation_indexes =
-            unsafe { allocator.find_allocation_indexes(allocator.offset(allocation)) };
-
         // SAFETY: allocation is a valid pointer allocated by the allocator.
+        let offset = unsafe { allocator.offset(allocation) };
         unsafe {
-            let offset = allocator.offset(allocation);
             free_only_allocator.free_offset(offset);
         }
 
-        // Index should be in the remote free list for the slab.
-        assert_eq!(
-            unsafe { allocator.remote_free_list(allocation_indexes.slab_index) }
-                .iterate()
-                .next()
-                .unwrap(),
-            allocation_indexes.index_within_slab
-        );
+        assert_eq!(remote_free_stack(&allocator), vec![offset]);
     }
 }
