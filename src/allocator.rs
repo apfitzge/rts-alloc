@@ -539,6 +539,7 @@ impl AllocatorBase {
         }
     }
 
+    /// Pushes an allocation offset onto the owning worker's remote-free list.
     fn remote_free(&self, offset: usize, slab_index: u32) {
         debug_assert_ne!(offset, NULL_USIZE);
 
