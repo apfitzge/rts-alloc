@@ -1,8 +1,6 @@
-use std::sync::atomic::AtomicUsize;
-
 use crate::cache_aligned::{CacheAligned, CacheAlignedU64};
 use crate::size_classes::NUM_SIZE_CLASSES;
-use crate::sync::{AtomicU32, AtomicU64, AtomicU8};
+use crate::sync::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize};
 
 /// Unique identifier for rts-alloc in shared memory.
 pub const MAGIC: u64 = u64::from_be_bytes(*b"\0rtsaloc");
