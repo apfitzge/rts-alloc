@@ -1,6 +1,6 @@
-use crate::cache_aligned::CacheAlignedU64;
+use crate::cache_aligned::{CacheAligned, CacheAlignedU64};
 use crate::size_classes::NUM_SIZE_CLASSES;
-use crate::sync::{AtomicU32, AtomicU64, AtomicU8};
+use crate::sync::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize};
 
 /// Unique identifier for rts-alloc in shared memory.
 pub const MAGIC: u64 = u64::from_be_bytes(*b"\0rtsaloc");
@@ -19,6 +19,7 @@ pub struct WorkerLocalListHeads {
     pub claimed: AtomicU8,
     pub outstanding_allocation_bytes: AtomicU64,
     pub heads: [WorkerLocalListPartialFullHeads; NUM_SIZE_CLASSES],
+    pub remote_free_head: CacheAligned<AtomicUsize>,
 }
 
 #[repr(C)]
@@ -67,7 +68,10 @@ pub struct Header {
 //     - each worker has its own set of heads.
 //     - each worker has a partial and full head for each size class.
 //     - the heads store indexes into the free list elements.
-//     - NULL_U32 is used to indicate a null pointer in the linked list.
+//     - each worker also has a cache-line-aligned remote-free head that tracks
+//       allocation offsets pending cleanup by that worker.
+//     - NULL_U32 is used for slab-list heads; NULL_USIZE is used for the
+//       remote-free offset head.
 //
 // free_list_elements:
 //     - list of free list elements, one per slab.
@@ -251,6 +255,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_worker_local_list_heads_layout() {
+        assert_eq!(core::mem::align_of::<WorkerLocalListHeads>(), 64);
+        assert_eq!(core::mem::size_of::<WorkerLocalListHeads>(), 128);
+        assert_eq!(core::mem::align_of::<CacheAligned<AtomicUsize>>(), 64);
+        assert_eq!(
+            core::mem::offset_of!(WorkerLocalListHeads, remote_free_head),
+            64
+        );
+    }
+
+    #[test]
     fn test_layout() {
         let num_workers = 4;
         let num_slabs = 8;
@@ -258,27 +273,32 @@ mod tests {
 
         let mut offset = layout::header_size();
         assert_eq!(offset, core::mem::size_of::<Header>());
+        assert_eq!(
+            offset,
+            core::mem::offset_of!(Header, worker_local_list_heads)
+        );
+        assert_eq!(offset, 128);
 
         offset += layout::worker_local_list_heads_size(num_workers);
-        assert_eq!(offset, 384);
+        assert_eq!(offset, 640);
 
         offset = layout::pad_for_free_list_elements(offset);
-        assert_eq!(offset, 384);
+        assert_eq!(offset, 640);
 
         offset += layout::free_list_elements_size(num_slabs);
-        assert_eq!(offset, 480);
+        assert_eq!(offset, 736);
 
         offset = layout::pad_for_slab_meta(offset);
-        assert_eq!(offset, 512);
+        assert_eq!(offset, 736);
 
         offset += layout::slab_meta_size(num_slabs);
-        assert_eq!(offset, 1536);
+        assert_eq!(offset, 864);
 
         offset = layout::pad_for_slab_free_stacks(offset);
-        assert_eq!(offset, 1536);
+        assert_eq!(offset, 864);
 
         offset += layout::free_stacks_size(num_slabs, slab_size);
-        assert_eq!(offset, 1824);
+        assert_eq!(offset, 1152);
 
         offset = layout::pad_for_slabs(offset, slab_size);
         assert_eq!(offset, 4096);

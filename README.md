@@ -31,12 +31,14 @@ When a worker frees allocations it created itself, the newly freed slot of
 memory within the slab is immediately returned and made available for reuse by
 the same worker.
 When a worker frees allocations created by another worker, the slot is added
-to a free list which will only become available for reuse by the worker that
-owns the corresponding slab cleans its remote free lists.
-There is some contention when cleaning these free lists, in finding the initial
-head of the list, so this should be done as infrequently as possible.
-Of course, the worker also does not want to clean so infrequently that it runs
-out of available memory space.
+to the owning worker's remote-free stack and will only become available for
+reuse when that worker cleans its remote frees.
+Cleaning remote frees swaps the owning worker's remote-free stack and reclaims
+all currently queued slots.
+Cleaning more often keeps freed memory available sooner, while cleaning less
+often batches more work into each cleanup.
+The worker should not clean so infrequently that it runs out of available
+memory space.
 
 When the owning worker has freed all slots within an owned slab, it must
 return the slab! [^1]

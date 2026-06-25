@@ -9,7 +9,6 @@ mod index;
 mod init;
 mod linked_list_node;
 mod memory_map;
-mod remote_free_list;
 mod size_classes;
 mod slab_meta;
 mod sync;
