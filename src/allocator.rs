@@ -12,14 +12,16 @@ use crate::{
     index::{NULL_U32, NULL_USIZE},
     size_classes::size_class_index,
 };
-use core::mem::offset_of;
-use core::ptr::NonNull;
+use core::{marker::PhantomData, mem::offset_of, ptr::NonNull};
 use std::fs::File;
 use std::sync::Arc;
 
 pub struct Allocator {
     base: AllocatorBase,
     worker_index: u32,
+    // `Allocator` may be moved between threads, but it is not safe to share
+    // one instance concurrently.
+    _not_sync: PhantomData<core::cell::Cell<()>>,
 }
 
 pub struct FreeOnlyAllocator {
@@ -139,7 +141,11 @@ impl Allocator {
         if worker_index >= base.layout.num_workers {
             return Err(Error::InvalidWorkerIndex);
         }
-        Ok(Allocator { base, worker_index })
+        Ok(Allocator {
+            base,
+            worker_index,
+            _not_sync: PhantomData,
+        })
     }
 }
 
