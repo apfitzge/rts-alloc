@@ -60,6 +60,7 @@ struct CachedLayout {
     num_slabs: u32,
     num_workers: u32,
     slab_size: u32,
+    slab_size_shift: u32,
     free_list_elements_offset: u32,
     slab_shared_meta_offset: u32,
     slab_free_stacks_offset: u32,
@@ -478,6 +479,7 @@ impl AllocatorBase {
                 num_slabs: header.num_slabs,
                 num_workers: header.num_workers,
                 slab_size: header.slab_size,
+                slab_size_shift: header.slab_size.trailing_zeros(),
                 free_list_elements_offset: header.free_list_elements_offset,
                 slab_shared_meta_offset: header.slab_shared_meta_offset,
                 slab_free_stacks_offset: header.slab_free_stacks_offset,
@@ -517,15 +519,14 @@ impl AllocatorBase {
         let (slab_index, offset_within_slab) = {
             assert!(offset >= self.layout.slabs_offset as usize);
             let offset_from_slab_start = offset.wrapping_sub(self.layout.slabs_offset as usize);
-            let slab_index = (offset_from_slab_start / self.layout.slab_size as usize) as u32;
+            let slab_index = (offset_from_slab_start >> self.layout.slab_size_shift) as u32;
             assert!(
                 slab_index < self.layout.num_slabs,
                 "slab index out of bounds"
             );
 
-            // SAFETY: The slab size is guaranteed to be a power of 2, for a valid header.
             let offset_within_slab =
-                unsafe { Self::offset_within_slab(self.layout.slab_size, offset_from_slab_start) };
+                Self::offset_within_slab(self.layout.slab_size, offset_from_slab_start);
 
             (slab_index, offset_within_slab)
         };
@@ -536,7 +537,7 @@ impl AllocatorBase {
                 .size_class_index
                 .load(Ordering::Acquire);
             let size_class = size_class(size_class_index);
-            (offset_within_slab / size_class) as u16
+            (offset_within_slab >> size_class.trailing_zeros()) as u16
         };
 
         AllocationIndexes {
@@ -581,9 +582,7 @@ impl AllocatorBase {
 
     /// Return offset within a slab.
     ///
-    /// # Safety
-    /// - The `slab_size` must be a power of 2.
-    const unsafe fn offset_within_slab(slab_size: u32, offset_from_slab_start: usize) -> u32 {
+    const fn offset_within_slab(slab_size: u32, offset_from_slab_start: usize) -> u32 {
         debug_assert!(slab_size.is_power_of_two());
         (offset_from_slab_start & (slab_size as usize - 1)) as u32
     }
